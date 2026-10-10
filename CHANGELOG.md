@@ -35,6 +35,22 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   QuantaStor Primary Chassis on the pool owner. A saved chassis backed by a
   different enclosure stays read-only instead of borrowing that enclosure's
   mapping or locate-light controls. (#933)
+### Fixed
+
+- Selecting a bay, or a path in the Connections panel, no longer removes the
+  state chip from that bay and its highlighted peers. Every bay, including
+  NVMe carrier and boot-device cards, keeps its LED dot, and a bay with its
+  locate light on blinks the dot and says "Locate light on" in its tooltip and
+  accessible name. (#935)
+- Stopped the Connections panel from narrowing the map before an operator picked
+  a bay, path or node, and let repeated clicks, Show all and Escape restore every
+  bay without hiding fault states. (#931)
+- The system-wide disk check no longer counts different QuantaStor disks as
+  one. On HA pairs with encrypted multipath disks, a shared `dm-N` device name
+  had merged them, so a missing disk could still count as placed. Records
+  with different serials now always count as different disks, and so do
+  records with different LUN ids unless one serial ties them together.
+  (#930)
 
 ## v0.24.0-beta.2 - 2026-10-09
 
