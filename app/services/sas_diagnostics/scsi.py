@@ -548,7 +548,7 @@ def decode_scsi_sense_event(event: dict[str, Any]) -> dict[str, Any]:
         "asc": asc,
         "asc_label": asc_label,
         "likely_layer": _sense_likely_layer(family),
-        "description": _sense_description(label, family),
+        "description": _sense_description(label, family, asc_tuple),
         "decode_confidence": confidence,
         "decode_source": "t10_scsi_asc_ascq" if asc_label else "kernel_message",
         "source_attribution": dict(T10_ASC_ASCQ_SOURCE if asc_label else KERNEL_MESSAGE_SOURCE),
@@ -857,7 +857,35 @@ def _sense_likely_layer(family: str) -> str:
     return fault_family_likely_layer(family)
 
 
-def _sense_description(label: str, family: str) -> str:
+# What a link-layer sense code means, where the standard says so, and what it
+# cannot tell the operator. Other codes keep the family sentence below.
+LINK_SENSE_DESCRIPTIONS: dict[tuple[int, int], str] = {
+    (0x4B, 0x04): (
+        'The other end of a SAS link rejected a frame because it arrived with a bad CRC, an invalid dword'
+        ' or an ERROR (SPL-4 6.20.3.1). A disk returns this code when a frame it sent was rejected and it'
+        ' stopped resending it (SPL-4 8.2.4). It does not say which link or hop on the path corrupted the'
+        ' frame.'
+    ),
+    (0x4B, 0x03): (
+        'A frame got neither ACK nor NAK within the 1 ms a receiver is allowed (SPL-4 6.20.3.1). The '
+        'sender closed the connection, then resent the frame or aborted the command (SPL-4 8.2.4). It '
+        'does not say where the frame or its reply was lost.'
+    ),
+    (0x4B, 0x06): (
+        'The disk waited past its initiator response timeout (SPL-4 9.2.7.4) for the next frame from the '
+        'host, such as write data, and aborted the command. It does not say which side or link stalled.'
+    ),
+    (0x47, 0x03): (
+        'A transferred information unit failed its CRC check. For a SATA disk behind a SAS HBA, this is '
+        "how the disk's own ATA INTERFACE CRC error is reported (SAT-4 table 162); compare its Interface "
+        'CRC Errors count in SMART details. It does not say which cable or connector.'
+    ),
+}
+
+
+def _sense_description(label: str, family: str, asc: tuple[int, int] | None = None) -> str:
+    if asc in LINK_SENSE_DESCRIPTIONS:
+        return LINK_SENSE_DESCRIPTIONS[asc]
     if family == "sas_protocol":
         return f"{label} is a SAS protocol/link symptom, often path or signal related."
     if family == "link_loss":

@@ -147,7 +147,7 @@ test("a bay's accessible name and tooltip say when its locate light is on", () =
     getLiveBackedStorageViewSlot: (view, slot) => view.live?.[slot.slot_index] || null,
   };
   const { slotAccessibleName, buildTooltipLines, buildStorageViewTooltipLines } = loadFunctions(
-    ["slotAccessibleName", "slotLocationLabel", "stateLabel", "buildTooltipLines", "buildStorageViewTooltipLines"],
+    ["slotAccessibleName", "slotLocationLabel", "stateLabel", "formatSlotHealth", "buildTooltipLines", "buildStorageViewTooltipLines"],
     context,
   );
   const lit = { slot: 4, slot_label: "04", device_name: "da4", pool_name: "tank", health: "ONLINE", state: "identify", identify_active: true };

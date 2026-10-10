@@ -11154,6 +11154,7 @@ class InventoryService:
             "ses_predicted_failure",
             "ses_disabled",
             "ses_hot_spare",
+            "ses_swapped",
             "ses_do_not_remove",
             "ses_fault_sensed",
             "ses_fault_requested",

@@ -161,6 +161,7 @@ class SESMapSlot:
     predicted_failure: bool | None = None
     disabled: bool | None = None
     hot_spare: bool | None = None
+    swapped: bool | None = None
     do_not_remove: bool | None = None
     fault_sensed: bool | None = None
     fault_requested: bool | None = None
@@ -746,6 +747,37 @@ def _ses_input_exceeds_bounds(output: str, element_pattern: str) -> bool:
     return False
 
 
+# `sesutil map` prints a bay's four SES status bytes after the status name, for
+# example "OK (0x11 0x00 0x00 0x00)". Bytes 0, 2 and 3 carry the same flags in
+# Device Slot and Array Device Slot elements. Byte 1 is HOT SPARE only in an
+# Array Device Slot; in a Device Slot it is the slot address. SES-3 r13d 7.2.3
+# table 72, 7.3.2 table 80 and 7.3.3 table 83.
+SES_STATUS_BYTES_REGEX = re.compile(
+    r"\((0x[0-9a-f]{2})\s+(0x[0-9a-f]{2})\s+(0x[0-9a-f]{2})\s+(0x[0-9a-f]{2})\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _apply_ses_status_bytes(slot: SESMapSlot, status: str | None, element_type: str | None) -> None:
+    match = SES_STATUS_BYTES_REGEX.search(status or "")
+    if not match:
+        return
+    common, byte1, byte2, byte3 = (int(value, 16) for value in match.groups())
+    flags = {
+        "predicted_failure": bool(common & 0x40),
+        "disabled": bool(common & 0x20),
+        "swapped": bool(common & 0x10),
+        "do_not_remove": bool(byte2 & 0x40),
+        "fault_sensed": bool(byte3 & 0x40),
+        "fault_requested": bool(byte3 & 0x20),
+    }
+    if re.match(r"array\b", normalize_text(element_type) or "", re.IGNORECASE):
+        flags["hot_spare"] = bool(byte1 & 0x20)
+    for attribute, value in flags.items():
+        # A second path to the same bay can only add a flag, never clear one.
+        setattr(slot, attribute, bool(getattr(slot, attribute)) or value)
+
+
 def _is_ses_device_slot_type(value: str | None) -> bool:
     element_type = normalize_text(value)
     return bool(
@@ -926,6 +958,7 @@ def _merge_ses_slot_evidence(existing: SESMapSlot, slot: SESMapSlot) -> None:
         "predicted_failure",
         "disabled",
         "hot_spare",
+        "swapped",
         "do_not_remove",
         "fault_sensed",
         "fault_requested",
@@ -1245,6 +1278,7 @@ def parse_sesutil_map(output: str) -> list[SESMapEnclosure]:
     enclosures: list[SESMapEnclosure] = []
     current_enclosure: SESMapEnclosure | None = None
     current_slot: SESMapSlot | None = None
+    current_element_type: str | None = None
     in_extra_status = False
     descriptor_presence_evidence: list[bool] = []
 
@@ -1287,6 +1321,7 @@ def parse_sesutil_map(output: str) -> list[SESMapEnclosure]:
                 "sesutil_map",
             )
             current_slot = None
+            current_element_type = element_match.group("type")
             in_extra_status = False
             descriptor_presence_evidence = []
             if _is_ses_device_slot_type(element_match.group("type")):
@@ -1302,6 +1337,7 @@ def parse_sesutil_map(output: str) -> list[SESMapEnclosure]:
 
         if stripped.startswith("Status:"):
             current_slot.status = normalize_text(stripped.split(":", 1)[1])
+            _apply_ses_status_bytes(current_slot, current_slot.status, current_element_type)
             if current_slot.status:
                 lowered = current_slot.status.lower()
                 if "not installed" in lowered or "absent" in lowered:
@@ -1905,6 +1941,7 @@ def _apply_sg_ses_status_line(
     for field_name, attribute in (
         ("Predicted failure", "predicted_failure"),
         ("Disabled", "disabled"),
+        ("Swap", "swapped"),
         ("Hot spare", "hot_spare"),
     ):
         match = re.search(rf"{re.escape(field_name)}=(?P<value>[01])", line)
@@ -2672,6 +2709,7 @@ def build_slot_candidates_from_ses_enclosures(
                     "ses_predicted_failure": slot.predicted_failure,
                     "ses_disabled": slot.disabled,
                     "ses_hot_spare": slot.hot_spare,
+                    "ses_swapped": slot.swapped,
                     "ses_do_not_remove": slot.do_not_remove,
                     "ses_fault_sensed": slot.fault_sensed,
                     "ses_fault_requested": slot.fault_requested,
