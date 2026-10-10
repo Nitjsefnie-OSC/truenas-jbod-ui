@@ -6091,6 +6091,7 @@
       slot.health ? `Health: ${slot.health}` : null,
       slot.target_system_label ? `Target: ${slot.target_system_label}` : null,
       slot.placement_key ? `Placement: ${slot.placement_key}` : null,
+      getLiveBackedStorageViewSlot(selectedView, slot)?.identify_active ? "Locate light on" : null,
     ].filter(Boolean);
 
     appendSmartTooltipMetrics(lines, slot, smartEntry);
@@ -6128,6 +6129,9 @@
       slot.vdev_name ? `${vdevLabel}: ${slot.vdev_name}` : `${vdevLabel}: n/a`,
       slot.health ? `Health: ${slot.health}` : "Health: n/a",
     ];
+    if (slot.identify_active) {
+      lines.push("Locate light on");
+    }
 
     appendSmartTooltipMetrics(lines, slot, smartEntry);
 
@@ -6156,6 +6160,9 @@
       parts.push(`${currentPlatform() === "linux" ? "mount" : "pool"} ${slot.pool_name}`);
     }
     parts.push(slot.health ? String(slot.health).toLowerCase() : stateLabel(slot).toLowerCase());
+    if (slot.identify_active) {
+      parts.push("Locate light on");
+    }
     return parts.join(", ");
   }
 
@@ -6728,8 +6735,9 @@
       return;
     }
     const bays = [];
-    // Selected, peer and fabric tiles draw a ring instead of a chip.
-    grid.querySelectorAll(".slot-tile[data-slot]:not(.selected, .peer-highlight, .fabric-highlight)").forEach((tile) => {
+    // #925: every bay draws its chip, ringed ones included (the ring is an
+    // outline on the tile), so every bay steers the spot.
+    grid.querySelectorAll(".slot-tile[data-slot]").forEach((tile) => {
       if (!tile.clientWidth) {
         return;
       }

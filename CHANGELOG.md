@@ -30,6 +30,11 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Selecting a bay, or a path in the Connections panel, no longer removes the
+  state chip from that bay and its highlighted peers. Every bay, including
+  NVMe carrier and boot-device cards, keeps its LED dot, and a bay with its
+  locate light on blinks the dot and says "Locate light on" in its tooltip and
+  accessible name. (#935)
 - Stopped the Connections panel from narrowing the map before an operator picked
   a bay, path or node, and let repeated clicks, Show all and Escape restore every
   bay without hiding fault states. (#931)
