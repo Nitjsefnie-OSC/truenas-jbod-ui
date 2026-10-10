@@ -30,6 +30,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Stopped the Connections panel from narrowing the map before an operator picked
+  a bay, path or node, and let repeated clicks, Show all and Escape restore every
+  bay without hiding fault states. (#931)
 - The system-wide disk check no longer counts different QuantaStor disks as
   one. On HA pairs with encrypted multipath disks, a shared `dm-N` device name
   had merged them, so a missing disk could still count as placed. Records
