@@ -12186,6 +12186,8 @@ class HistorySkippedScopeVisibilityTests(unittest.IsolatedAsyncioTestCase):
         }
         self.unreachable: set[tuple[str, str | None]] = set()
         self.extra_enclosures: dict[str, str] = {}
+        self.no_enclosure: set[str] = set()
+        self.storage_views_fail: set[str] = set()
         transport = patch.object(self.collector, "_fetch_json_sync", side_effect=self._source)
         transport.start()
         self.addCleanup(transport.stop)
@@ -12197,14 +12199,15 @@ class HistorySkippedScopeVisibilityTests(unittest.IsolatedAsyncioTestCase):
                 raise HistorySourceError.unreachable("Synthetic host.example.test unavailable")
             system_label, enclosure_label = self.LABELS[system]
             extra = self.extra_enclosures.get(system)
+            bayless = system in self.no_enclosure
             return {
                 "systems": [{"id": "nvr"}, {"id": "esx"}],
                 "selected_system_id": system,
                 "selected_system_label": system_label,
                 "selected_system_platform": self.PLATFORMS[system],
-                "selected_enclosure_id": f"{system}-bay",
-                "selected_enclosure_label": enclosure_label,
-                "enclosures": [{"id": f"{system}-bay"}, *([{"id": extra}] if extra else [])],
+                "selected_enclosure_id": None if bayless else f"{system}-bay",
+                "selected_enclosure_label": None if bayless else enclosure_label,
+                "enclosures": [] if bayless else [{"id": f"{system}-bay"}, *([{"id": extra}] if extra else [])],
                 "sources": {
                     "api": {"enabled": False, "ok": True},
                     "ssh": dict(self.ssh[system]),
@@ -12213,6 +12216,8 @@ class HistorySkippedScopeVisibilityTests(unittest.IsolatedAsyncioTestCase):
                 "slots": [{"slot": 0, "present": True, "serial": f"TESTSER-{system}", "state": "healthy"}],
             }
         if path == "/api/storage-views":
+            if params.get("system_id") in self.storage_views_fail:
+                raise HistorySourceError.unreachable("Synthetic host.example.test storage views unavailable")
             return {"views": []}
         if path.endswith("smart-batch"):
             return {"summaries": [{"slot": 0, "summary": {
@@ -12294,6 +12299,32 @@ class HistorySkippedScopeVisibilityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HistorySourceError):
             await self._pass(force_slow=False, cached_root_only=True)
         self.assertEqual(self.collector.status()["last_skipped_scopes"], [self._skipped("esx"), self._skipped("nvr")])
+
+    async def test_root_only_pass_keeps_a_storage_view_failure_it_did_not_retry(self):
+        # A storage-view failure is listed with no enclosure, the same key a
+        # root scope without an enclosure has. A root-only pass never reads
+        # storage views, so it must not clear that entry.
+        self.ssh["esx"]["required_ok"] = True
+        self.no_enclosure = {"nvr"}
+        self.storage_views_fail = {"nvr"}
+        views_skip = {
+            "system_id": "nvr", "system_label": "Synthetic NVR", "enclosure_id": None, "enclosure_label": None,
+            "reason": "storage_views_unavailable",
+            "detail": history_collector_module.SCOPE_SKIP_REASONS["storage_views_unavailable"],
+        }
+        status = await self._pass()
+        self.assertEqual(status["last_skipped_scopes"], [views_skip])
+
+        self.now += timedelta(minutes=5)
+        status = await self._pass(force_slow=False, cached_root_only=True)
+        self.assertEqual(status["last_skipped_scopes"], [views_skip])
+        self.assertNotIn("host.example.test", json.dumps(status["last_skipped_scopes"]))
+
+        # The next fleet pass reads the views again and clears it.
+        self.storage_views_fail = set()
+        self.now += timedelta(minutes=5)
+        status = await self._pass()
+        self.assertEqual(status["last_skipped_scopes"], [])
 
 
 class HistoryCollectorDiagnosticsTests(unittest.TestCase):

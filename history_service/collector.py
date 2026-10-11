@@ -1777,6 +1777,8 @@ class HistoryCollector:
 
         A fleet scan replaces the list. A root-only scan looked at one scope,
         so it replaces only that scope's entry and keeps the rest of the fleet.
+        It never reads storage views, so a storage-view failure stays listed
+        even when it shares the root scope's key (a system with no enclosure).
         """
         skipped = [*self._unreadable_scopes] + [
             self._skipped_scope_entry(scope, reason)
@@ -1792,7 +1794,8 @@ class HistoryCollector:
         kept = [
             entry
             for entry in self.last_skipped_scopes or []
-            if (entry["system_id"], entry["enclosure_id"]) not in scanned
+            if entry["reason"] == "storage_views_unavailable"
+            or (entry["system_id"], entry["enclosure_id"]) not in scanned
         ]
         self.last_skipped_scopes = [*kept, *skipped]
 
