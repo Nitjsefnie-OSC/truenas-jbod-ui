@@ -142,6 +142,44 @@ for (const outcome of ["confirmed", "unconfirmed", "failed"]) {
   });
 }
 
+test("a late locate reply never puts an older shelf snapshot over a newer cached one", async () => {
+  const pending = deferred();
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false, serial:"SANITIZED-OLD"};
+  const state = {
+    snapshotMode:false,
+    snapshot:{selected_system_id:"a", selected_enclosure_id:"one", last_updated:"2026-01-01T00:00:00Z", slots:[originSlot]},
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(){}, sendScopedRequest:async()=>pending.promise,
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", "snapshotUpdatedMs", ...guardNames, "sendLedAction"], context);
+  const run = c.sendLedAction("IDENTIFY");
+  await new Promise(resolve=>setImmediate(resolve));
+  // The operator leaves, comes back long enough to load newer inventory for
+  // this shelf, and leaves again before the slow reply arrives.
+  state.snapshotReuseCache["a::one"] = {
+    selected_system_id:"a", selected_enclosure_id:"one", last_updated:"2026-01-01T00:05:00Z",
+    slots:[{slot:0, slot_label:"00", identify_active:false, serial:"SANITIZED-NEW"}],
+  };
+  state.selectedEnclosureId = "two";
+  state.snapshot = {selected_system_id:"a", selected_enclosure_id:"two", slots:[]};
+  pending.resolve({ok:true, slot:0, requested_active:true, identify_active:true, confirmed:true});
+  await run;
+
+  const kept = state.snapshotReuseCache["a::one"];
+  assert.equal(kept.slots[0].serial, "SANITIZED-NEW");
+  assert.equal(kept.slots[0].identify_active, true, "only the LED state is merged in");
+  assert.equal(kept.last_updated, "2026-01-01T00:05:00Z");
+});
+
 test("a locate result in the same scope keeps its plain message", async () => {
   const statuses = [];
   const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};

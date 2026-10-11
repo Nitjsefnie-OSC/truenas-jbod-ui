@@ -2643,6 +2643,11 @@
     return `${systemId || "__system__"}::${enclosureId || "__auto__"}`;
   }
 
+  function snapshotUpdatedMs(snapshot) {
+    const parsed = Date.parse(snapshot?.last_updated || "");
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
   function snapshotHasTrustedTopology(snapshot) {
     if (!snapshot) {
       return false;
@@ -10705,7 +10710,15 @@
         retainedSnapshot = cloneJsonValue(state.snapshot);
         renderAll();
       } else {
-        retainedSnapshot = patchResult(originSnapshot);
+        // The operator may have loaded newer inventory for this shelf while
+        // the reply was slow. Patch only the LED state into the newest copy
+        // we hold; never put the older origin snapshot back over it.
+        const cacheKey = snapshotReuseCacheKey(mutation.systemId, originSnapshot?.selected_enclosure_id || null);
+        const cached = state.snapshotReuseCache?.[cacheKey];
+        const newest = cached && snapshotUpdatedMs(cached) >= snapshotUpdatedMs(originSnapshot)
+          ? cloneJsonValue(cached)
+          : originSnapshot;
+        retainedSnapshot = patchResult(newest);
       }
 
       const requestedState = payload.requested_active === false ? "off" : "on";
@@ -10720,11 +10733,17 @@
       handleWriteRejection(error);
       reportLocate(`Could not change the locate light for slot ${slot.slot_label}: ${error.message || error}`, "error");
     } finally {
+      const retainedKey = retainedSnapshot
+        ? snapshotReuseCacheKey(mutation.systemId, retainedSnapshot.selected_enclosure_id || null)
+        : null;
+      // finishMutationContext() clears this system's reuse cache, so read the
+      // entry first and re-store only if the retained copy is not older.
+      const cachedBeforeFinish = retainedKey ? state.snapshotReuseCache?.[retainedKey] : null;
       finishMutationContext(mutation, succeeded);
-      if (retainedSnapshot) {
+      if (retainedSnapshot && !(cachedBeforeFinish
+        && snapshotUpdatedMs(cachedBeforeFinish) > snapshotUpdatedMs(retainedSnapshot))) {
         state.snapshotReuseCache ||= {};
-        const enclosureId = retainedSnapshot.selected_enclosure_id || null;
-        state.snapshotReuseCache[snapshotReuseCacheKey(mutation.systemId, enclosureId)] = retainedSnapshot;
+        state.snapshotReuseCache[retainedKey] = retainedSnapshot;
       }
     }
   }
