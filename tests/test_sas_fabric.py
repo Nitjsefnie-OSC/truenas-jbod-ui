@@ -145,6 +145,38 @@ class SasDiagnosticLayerTests(unittest.TestCase):
         self.assertEqual(path_exception["family"], "device_path_exception")
         self.assertEqual(path_exception["likely_layer"], "Target device or path state")
 
+    def test_link_sense_codes_explain_meaning_source_and_limits(self) -> None:
+        cases = {
+            "4b,4": ("SPL-4 6.20.3.1", "bad CRC"),
+            "4b,3": ("SPL-4 6.20.3.1", "1 ms"),
+            "4b,6": ("SPL-4 9.2.7.4", "initiator response timeout"),
+            "47,3": ("SAT-4 table 162", "Interface CRC Errors"),
+        }
+        for asc, (clause, phrase) in cases.items():
+            with self.subTest(asc=asc):
+                decoded = decode_scsi_sense_event({"sense_key": "ABORTED COMMAND", "asc": asc})
+                description = decoded["description"]
+                self.assertIn(clause, description)
+                self.assertIn(phrase, description)
+                # Each one says what the code cannot tell the operator.
+                self.assertRegex(description, r"does not say (which|where)")
+                self.assertNotIn("often path or signal", description)
+                self.assertLessEqual(len(description), MAX_DIAGNOSTIC_TEXT_LENGTH)
+                self.assertEqual(decoded["decode_source"], "t10_scsi_asc_ascq")
+
+        # Codes without a written explanation keep their family sentence.
+        other = decode_scsi_sense_event({"sense_key": "ABORTED COMMAND", "asc": "4b,0"})
+        self.assertEqual(
+            other["description"],
+            "Data phase error is a SAS protocol/link symptom, often path or signal related.",
+        )
+
+    def test_mpr_nak_event_carries_the_link_explanation(self) -> None:
+        events = [
+            decode_mpr_dmesg_event({"event_type": "scsi_sense", "reason": "NAK received", "sense_key": "ABORTED COMMAND", "asc": "4b,4"}),
+        ]
+        self.assertIn("bad CRC", events[0]["description"])
+
     def test_read_capacity_commands_are_capacity_queries_not_read_io(self) -> None:
         messages = (
             "READ CAPACITY(10). CDB: 25 00 00 00 00 00 00 00 00 00",
