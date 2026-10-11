@@ -5035,10 +5035,10 @@ class InventoryService:
         invalidate_snapshot: bool = True,
     ) -> dict[str, Any]:
         slot_view = self._resolve_led_slot(slot, selected_enclosure_id)
-        if slot_view is not None and self._led_target_shelf_unrecorded(slot_view):
-            # The shelf check in the locate session needs the shelf ID the
-            # device reported at discovery. Without one, a remembered target
-            # cannot be checked, so read the current snapshot first (#926).
+        if slot_view is not None and self._led_target_needs_snapshot_reread(slot_view):
+            # A remembered target is used without a snapshot read only when the
+            # press itself can confirm it reaches this bay. Otherwise read the
+            # current snapshot first, as before #926.
             snapshot = await self.get_snapshot(selected_enclosure_id=selected_enclosure_id)
             slot_view = next((item for item in snapshot.slots if item.slot == slot), None)
         if not slot_view:
@@ -5208,13 +5208,17 @@ class InventoryService:
             or SNAPSHOT_NO_ENCLOSURE_KEY
         )
         default_selection = enclosure_id is None
-        cancelling = self._snapshot_refresh_tasks.get(cache_key)
-        if cancelling is not None and not cancelling.done() and cancelling.cancelling():
-            # The invalidation above cancelled an earlier press's refresh. It
-            # stays registered, and the key stays marked invalid, until the
-            # task unwinds and its cleanup runs. Scheduling now would see that
-            # task and do nothing; schedule the replacement after the cleanup.
-            cancelling.add_done_callback(
+        superseded = self._snapshot_refresh_tasks.get(cache_key)
+        if superseded is not None and not superseded.done():
+            # Any refresh still registered here began before the invalidation
+            # above. If it was cancelled it is still unwinding; if it was
+            # already rebuilding it was not cancelled and will end without
+            # publishing. Either way it stays registered, and the key stays
+            # marked invalid, until its cleanup runs, so scheduling now would
+            # do nothing. Schedule the replacement after that cleanup. A burst
+            # of presses adds one callback each, but only the first starts a
+            # task; the rest find it running.
+            superseded.add_done_callback(
                 lambda _done: self._schedule_background_snapshot_refresh(
                     cache_key,
                     default_selection=default_selection,
@@ -14847,8 +14851,27 @@ class InventoryService:
         return results
 
     @staticmethod
-    def _led_target_shelf_unrecorded(slot_view: SlotView) -> bool:
-        if slot_view.led_backend not in {"ssh", "scale_sg_ses", "quantastor_sg_ses"}:
+    def _led_target_needs_snapshot_reread(slot_view: SlotView) -> bool:
+        """Whether a remembered locate target must be refreshed before a press.
+
+        SES targets are checked inside the locate session against the shelf
+        their device reported, so they need a recorded shelf ID. The TrueNAS
+        API addresses the bay by enclosure ID and slot, and a UniFi NVR's bays
+        are fixed in its one chassis; neither can reach another drive. A
+        Supermicro BMC controller/physical index can be reassigned by a
+        controller rescan or replacement and cannot be checked in the press,
+        so it always rereads (#926).
+        """
+        backend = slot_view.led_backend
+        if backend == "supermicro_bmc":
+            return True
+        if backend == "unifi_fault":
+            return False
+        if backend == "api":
+            # Its SSH fallback runs the SES path, so that target must be checkable.
+            if not (slot_view.ssh_ses_device and slot_view.ssh_ses_element_id is not None):
+                return False
+        elif backend not in {"ssh", "scale_sg_ses", "quantastor_sg_ses"}:
             return False
         targets = [target for target in (slot_view.ssh_ses_targets or []) if isinstance(target, dict)]
         if not targets:

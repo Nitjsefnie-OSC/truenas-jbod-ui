@@ -18997,6 +18997,43 @@ ses1:
         self.assertNotIn("shelf-a", service._snapshot_refresh_tasks)
         self.assertNotIn("shelf-a", service._snapshot_invalidated)
 
+    async def test_second_locate_replaces_a_refresh_it_could_not_cancel(self) -> None:
+        # The first press's refresh is already rebuilding (it holds snapshot
+        # activity), so the second press's invalidation cannot cancel it. That
+        # refresh then ends without publishing; a replacement must still run.
+        service = self.led_service("core", SlotView(slot=0, slot_label="00", row_index=0, column_index=0))
+        invalidated_at_start: list[bool] = []
+        release_first = asyncio.Event()
+
+        async def background_refresh(cache_key: str, *, default_selection: bool = False) -> None:
+            invalidated_at_start.append(cache_key in service._snapshot_invalidated)
+            if len(invalidated_at_start) == 1:
+                service._begin_snapshot_activity(cache_key)
+                try:
+                    await release_first.wait()
+                finally:
+                    service._finish_snapshot_activity(cache_key)
+
+        service._background_snapshot_refresh = background_refresh
+
+        service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+        first = service._snapshot_refresh_tasks["shelf-a"]
+        await asyncio.sleep(0)
+        for _ in range(3):
+            service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+        self.assertFalse(first.cancelling(), "this refresh is mid-rebuild and is not cancelled")
+        release_first.set()
+        await asyncio.wait_for(first, timeout=0.5)
+        for _ in range(50):
+            if len(invalidated_at_start) >= 2 and not service._snapshot_refresh_tasks:
+                break
+            await asyncio.sleep(0)
+
+        # One replacement for the whole burst, started after cleanup.
+        self.assertEqual(invalidated_at_start, [False, False], "the superseded refresh was not replaced")
+        self.assertNotIn("shelf-a", service._snapshot_refresh_tasks)
+        self.assertNotIn("shelf-a", service._snapshot_invalidated)
+
     async def test_second_locate_refresh_retries_a_source_read_from_before_it(self) -> None:
         # The first press's source read started before the second press
         # invalidated the sources, so it can only end as stale. The second
@@ -19218,6 +19255,40 @@ ses1:
         self.assertIn(("node-a.example.test", "sudo -n /usr/bin/sg_ses --dev-slot-num=0 --set=ident /dev/sg27"), fake.sent)
         self.assertFalse(any("--set=ident" in command for host, command in fake.sent if host == "node-b.example.test"))
         service.schedule_led_snapshot_refresh.assert_called_once_with(enclosure_id="shelf-a")
+
+    async def test_identity_addressed_locate_backends_keep_the_fast_path(self) -> None:
+        # The TrueNAS API addresses the bay by enclosure ID and slot, and a
+        # UniFi NVR's bays are fixed in its one chassis, so a remembered
+        # target cannot reach another drive and no snapshot reread is needed.
+        for backend, raw_status in (("api", {}), ("unifi_fault", {"vendor_slot_number": 1})):
+            with self.subTest(backend=backend):
+                slot = SlotView(
+                    slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id="shelf-a",
+                    led_supported=True, led_backend=backend, raw_status=raw_status,
+                )
+                service = self.led_service("scale" if backend == "api" else "linux", slot)
+                service.get_snapshot = AsyncMock(side_effect=AssertionError("no snapshot reread"))
+                service.truenas_client.set_slot_status = AsyncMock()
+                service._set_unifi_slot_led_over_ssh = AsyncMock(return_value={"confirmed": True})
+
+                await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+                service.get_snapshot.assert_not_awaited()
+
+    async def test_api_locate_with_an_unchecked_ssh_fallback_rereads_the_snapshot_first(self) -> None:
+        slot = SlotView(
+            slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id="shelf-a",
+            led_supported=True, led_backend="api", ssh_ses_device="/dev/ses0", ssh_ses_element_id=7,
+        )
+        service = self.led_service("core", slot)
+        service.get_snapshot = AsyncMock(return_value=InventorySnapshot(
+            slots=[slot], refresh_interval_seconds=30, selected_enclosure_id="shelf-a",
+        ))
+        service.truenas_client.set_slot_status = AsyncMock()
+
+        await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        service.get_snapshot.assert_awaited_once_with(selected_enclosure_id="shelf-a")
 
     async def test_locate_without_a_recorded_shelf_rereads_the_snapshot_first(self) -> None:
         # A shelf whose SES pages report no enclosure ID cannot be checked in
@@ -20241,15 +20312,23 @@ Enclosure Status diagnostic page:
             )
             snapshot = InventorySnapshot(slots=[slot], refresh_interval_seconds=30)
             service._remember_led_snapshot(inventory_module.SNAPSHOT_NO_ENCLOSURE_KEY, snapshot)
+            # A controller rescan has since moved this bay's drive to physical
+            # index 5. BMC indices cannot be checked inside the press, so the
+            # press rereads the snapshot and uses the current coordinates.
+            current = slot.model_copy(update={"raw_status": {"bmc_controller_id": 0, "bmc_physical_index": 5}})
+            service.get_snapshot = AsyncMock(
+                return_value=InventorySnapshot(slots=[current], refresh_interval_seconds=30)
+            )
 
             await service.set_slot_led(0, LedAction.identify, invalidate_snapshot=False)
             await service.set_slot_led(0, LedAction.clear, invalidate_snapshot=False)
 
+            self.assertEqual(service.get_snapshot.await_count, 2)
             self.assertEqual(
                 bmc_service.set_drive_identify.call_args_list,
                 [
-                    unittest.mock.call(0, 4, True),
-                    unittest.mock.call(0, 4, False),
+                    unittest.mock.call(0, 5, True),
+                    unittest.mock.call(0, 5, False),
                 ],
             )
 
