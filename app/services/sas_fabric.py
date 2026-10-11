@@ -19,7 +19,7 @@ from app.models.domain import (
     SourceStatus,
     SlotView,
 )
-from app.services.parsers import canonicalize_ssh_command, normalize_text
+from app.services.parsers import canonicalize_ssh_command, normalize_text, parse_camcontrol_devlist
 from app.services.sas_fabric_parsers import (
     CORE_MPRUTIL_UNIT_SUBCOMMANDS as CORE_MPRUTIL_UNIT_SUBCOMMANDS,
     _freebsd_pci_location_to_address as _freebsd_pci_location_to_address,
@@ -542,6 +542,9 @@ def _build_core_mpr_fabric_snapshot(context: SasFabricBuildContext) -> SasFabric
         controllers=controllers,
         diagnostics=mpr_kernel_diagnostics,
     )
+    # CAM's per-device target on its own controller is the identity that ties a
+    # member disk to its `mprutil show devices` row (#936).
+    cam_devices = parse_camcontrol_devlist(normalized_outputs.get("camcontrol devlist -v", ""))
     backplane_zones = _add_backplane_zone_nodes(nodes, snapshot)
 
     for slot in snapshot.slots:
@@ -607,6 +610,7 @@ def _build_core_mpr_fabric_snapshot(context: SasFabricBuildContext) -> SasFabric
                 slot_number=slot.slot,
                 path_state=state,
                 member_device_name=member.device_name,
+                member_target=_cam_member_target(cam_devices, controller_name, member.device_name),
                 slot_enclosure_ids=_slot_enclosure_candidates(slot),
                 slot_location_numbers=_slot_location_number_candidates(slot),
                 slot_ses_number=_parse_mpr_slot_number((slot.raw_status or {}).get("ses_slot_number")),
@@ -2307,6 +2311,7 @@ def _build_mpr_trace_index(
     devices: dict[tuple[str, str], dict[str, Any] | None] = {}
     devices_by_location: dict[tuple[str, str, int], dict[str, Any] | None] = {}
     devices_by_handle_location: dict[tuple[str, str, int], dict[str, Any] | None] = {}
+    devices_by_target: dict[tuple[str, int], dict[str, Any] | None] = {}
     enclosures: dict[tuple[str, str], str] = {}
     enclosure_keys_by_handle: dict[tuple[str, str], str] = {}
     expanders: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -2351,6 +2356,12 @@ def _build_mpr_trace_index(
                 # None latches contradictory provider rows instead of letting
                 # the last row choose which bay receives their diagnostics.
                 devices[key] = context if key not in devices or devices[key] == context else None
+            device_target = _parse_mpr_target(device.get("target"))
+            if device_target is not None and _is_mpr_disk_target(device.get("device")):
+                target_key = (controller_name, device_target)
+                devices_by_target[target_key] = (
+                    context if target_key not in devices_by_target or devices_by_target[target_key] == context else None
+                )
             device_slot = _parse_mpr_slot_number(device.get("slot"))
             # Provider-local handles still locate conflicting occupants when
             # the optional enclosure logical-ID probe is absent.
@@ -2370,6 +2381,7 @@ def _build_mpr_trace_index(
         "devices": devices,
         "devices_by_location": devices_by_location,
         "devices_by_handle_location": devices_by_handle_location,
+        "devices_by_target": devices_by_target,
         "enclosure_keys_by_handle": enclosure_keys_by_handle,
         "enclosures": enclosures,
         "expanders": {key: _dedupe_strings(value) for key, value in expanders.items()},
@@ -2387,6 +2399,7 @@ def _add_mpr_member_trace_context(
     slot_number: int,
     path_state: str,
     member_device_name: str | None,
+    member_target: int | None = None,
     slot_enclosure_ids: list[str] | None = None,
     slot_location_numbers: list[int] | None = None,
     slot_ses_number: int | None = None,
@@ -2396,6 +2409,7 @@ def _add_mpr_member_trace_context(
         trace_index,
         controller_name,
         member_device_name,
+        member_target=member_target,
         slot_enclosure_ids=slot_enclosure_ids,
         slot_location_numbers=slot_location_numbers,
         slot_ses_number=slot_ses_number,
@@ -2528,6 +2542,7 @@ def _lookup_mpr_device_context(
     controller_name: str,
     device_name: str | None,
     *,
+    member_target: int | None = None,
     slot_enclosure_ids: list[str] | None = None,
     slot_location_numbers: list[int] | None = None,
     slot_ses_number: int | None = None,
@@ -2570,6 +2585,36 @@ def _lookup_mpr_device_context(
                 if slot_ses_number is None or slot_ses_number <= 0 or location != slot_ses_number - 1:
                     return None
             return context
+    if member_target is not None:
+        # CAM names this member's target on this controller: join by that
+        # identity rather than by bay position (#936).
+        target_key = (controller_name, member_target)
+        by_target = trace_index.get("devices_by_target", {})
+        if target_key in by_target:
+            context = by_target[target_key]
+            if context is None:
+                return None
+            if enclosure_keys and context.get("enclosure_key") and context["enclosure_key"] not in enclosure_keys:
+                return None
+            known_handles = {
+                handle for (controller_id, handle), enclosure_key in trace_index.get("enclosure_keys_by_handle", {}).items()
+                if controller_id == context["controller_id"] and enclosure_key in enclosure_keys
+            }
+            enc_handle = str(context.get("enclosure_handle") or "")
+            if known_handles and enc_handle and enc_handle not in known_handles:
+                return None
+            named_occupants = set(_device_name_candidates(context.get("device")))
+            if named_occupants and member_names and not named_occupants.intersection(member_names):
+                return None
+            location = _parse_mpr_slot_number(context.get("slot"))
+            for key, index_name in (
+                ((controller_name, enc_handle, location), "devices_by_handle_location"),
+                ((controller_name, context.get("enclosure_key"), location), "devices_by_location"),
+            ):
+                occupants = trace_index.get(index_name, {})
+                if key in occupants and occupants[key] is None:
+                    return None
+            return context
     devices_by_location = trace_index.get("devices_by_location", {})
     for enclosure_id in slot_enclosure_ids or []:
         enclosure_key = _identifier_lookup_key(enclosure_id)
@@ -2583,6 +2628,11 @@ def _lookup_mpr_device_context(
             if context:
                 named_occupants = set(_device_name_candidates(context.get("device")))
                 if named_occupants and member_names and not named_occupants.intersection(member_names):
+                    return None
+                # A row the controller assigns to another target is another
+                # device, whatever its position.
+                row_target = _parse_mpr_target(context.get("target"))
+                if member_target is not None and row_target is not None and row_target != member_target:
                     return None
                 return context
     return None
@@ -2653,18 +2703,40 @@ def _slot_enclosure_candidates(slot: SlotView) -> list[str]:
 
 
 def _slot_location_number_candidates(slot: SlotView) -> list[int]:
-    """Exact bay coordinates only; SES element indices are not bay numbers.
+    """Exact bay coordinates only; SES numbers are not MPR locations.
 
-    A provider-named member can independently prove a one-based SES conversion
-    in `_lookup_mpr_device_context`. Missing exact evidence alone cannot.
+    SES numbers bays one-based per shelf while an MPR location is zero-based per
+    expander, so `ses_slot_number` is never a positional candidate: on a
+    cascaded shelf it lands on the next bay (#936). A provider-named member can
+    still prove a one-based conversion in `_lookup_mpr_device_context`, and a
+    CAM target joins by identity there.
     """
     raw_status = slot.raw_status if isinstance(slot.raw_status, dict) else {}
     exact: list[int] = [slot.slot]
-    for value in (raw_status.get("ses_slot_number"), raw_status.get("slot_number")):
-        parsed = _parse_mpr_slot_number(value)
-        if parsed is not None and parsed not in exact:
-            exact.append(parsed)
+    parsed = _parse_mpr_slot_number(raw_status.get("slot_number"))
+    if parsed is not None and parsed not in exact:
+        exact.append(parsed)
     return exact
+
+
+def _parse_mpr_target(value: Any) -> int | None:
+    text = normalize_text(str(value)) if value is not None else None
+    if not text or not text.isdigit():
+        return None
+    return int(text, 10)
+
+
+def _cam_member_target(cam_devices: Any, controller_name: str, device_name: str | None) -> int | None:
+    """The member's CAM target, only when CAM places it on this controller."""
+    targets: set[int] = set()
+    for candidate in _device_name_candidates(device_name):
+        key = candidate.lower()
+        if normalize_text(cam_devices.controllers.get(key)) != controller_name:
+            continue
+        target = _parse_mpr_target(cam_devices.targets.get(key))
+        if target is not None:
+            targets.add(target)
+    return targets.pop() if len(targets) == 1 else None
 
 
 def _device_name_candidates(*values: Any) -> list[str]:
