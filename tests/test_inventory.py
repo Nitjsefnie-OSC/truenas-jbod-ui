@@ -18965,6 +18965,53 @@ ses1:
         self.assertNotIn("shelf-a", service._snapshot_refresh_tasks)
         self.assertNotIn("shelf-a", service._snapshot_invalidated)
 
+    async def test_second_locate_refresh_does_not_join_a_source_read_from_before_it(self) -> None:
+        # The first press's source read started before the second press
+        # invalidated the sources, so it can only end as stale. The second
+        # press's refresh must start its own read instead of joining it.
+        service = self.led_service("core", SlotView(slot=0, slot_label="00", row_index=0, column_index=0))
+        bundles: list[InventorySourceBundle] = []
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def collect() -> InventorySourceBundle:
+            bundle = InventorySourceBundle(
+                raw_data=TrueNASRawData(enclosures=[], disks=[], pools=[], disk_temperatures={}, smart_test_results=[]),
+                ssh_outputs={},
+                ssh_collected=False,
+                warnings=[],
+                sources={},
+                scale_ses_data=ParsedSSHData(),
+                quantastor_ses_data=ParsedSSHData(),
+            )
+            bundles.append(bundle)
+            if len(bundles) == 1:
+                first_started.set()
+                await release_first.wait()
+            return bundle
+
+        service._collect_inventory_source_bundle = AsyncMock(side_effect=collect)
+        service._get_snapshot_result = AsyncMock()
+
+        with patch.object(inventory_module.logger, "exception"):
+            service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+            await asyncio.wait_for(first_started.wait(), timeout=0.5)
+            service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+            for _ in range(5):
+                await asyncio.sleep(0)
+            release_first.set()
+            for _ in range(100):
+                if not service._snapshot_refresh_tasks and service._source_bundle_refresh_task is None:
+                    break
+                await asyncio.sleep(0.005)
+
+        self.assertEqual(len(bundles), 2, "the replacement refresh did not read the sources again")
+        service._get_snapshot_result.assert_awaited_once()
+        self.assertEqual(
+            service._get_snapshot_result.await_args.kwargs["minimum_source_publication"],
+            bundles[1].publication,
+        )
+
     async def test_led_sequence_uses_one_owned_session_without_the_inventory_lock(self) -> None:
         service = self.led_service(
             "core",

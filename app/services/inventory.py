@@ -1330,6 +1330,9 @@ class InventoryService:
         self._esxi_storcli_swapped = False
         self._snapshot_refresh_tasks: dict[str, asyncio.Task[None]] = {}
         self._source_bundle_refresh_task: asyncio.Task[InventorySourceBundle | None] | None = None
+        # Source generation the background source refresh started under. A
+        # task from before an invalidation can only end as stale.
+        self._source_bundle_refresh_generation = -1
         self._smart_refresh_tasks: dict[SmartCacheKey, asyncio.Task[None]] = {}
         self._scale_preferred_ses_host: str | None = None
         self._quantastor_preferred_ses_host: str | None = None
@@ -3696,11 +3699,19 @@ class InventoryService:
 
     def _schedule_background_source_bundle_refresh(self) -> asyncio.Task[InventorySourceBundle | None]:
         existing = self._source_bundle_refresh_task
-        if existing is not None and not existing.done():
+        if (
+            existing is not None
+            and not existing.done()
+            and self._source_bundle_refresh_generation == self._source_bundle_generation
+        ):
             return existing
-
+        # Either nothing is running, or the running read began before the
+        # sources were invalidated (for example by a second locate press) and
+        # will be rejected as stale. Start a fresh read; the source lock
+        # serializes it behind the stale one.
         task = asyncio.create_task(self._background_source_bundle_refresh())
         self._source_bundle_refresh_task = task
+        self._source_bundle_refresh_generation = self._source_bundle_generation
 
         def _cleanup(completed: asyncio.Task[InventorySourceBundle | None]) -> None:
             if self._source_bundle_refresh_task is completed:
