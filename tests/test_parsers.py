@@ -135,6 +135,12 @@ scbus13 on mpr1 bus 0:
         self.assertEqual(parsed.models["da77"], "HGST HUH728080AL5200 A907")
         self.assertEqual(parsed.controllers["da24"], "mpr0")
         self.assertEqual(parsed.controllers["da71"], "mpr1")
+        # The CAM target is the controller-local identity Storage Fabric joins
+        # to `mprutil show devices` (#936); the same number on another HBA is
+        # a different device.
+        self.assertEqual(parsed.targets["da24"], "153")
+        self.assertEqual(parsed.targets["da30"], "159")
+        self.assertEqual(parsed.targets["da71"], "153")
         self.assertEqual(parsed.peer_devices, {})
         same_row = parse_camcontrol_devlist(
             "<Synthetic disk> at scbus0 target 0 lun 0 (da0,ada0,pass0)"

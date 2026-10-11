@@ -217,6 +217,10 @@ class CamcontrolInfo:
     models: dict[str, str] = field(default_factory=dict)
     controllers: dict[str, str] = field(default_factory=dict)
     peer_devices: dict[str, list[str]] = field(default_factory=dict)
+    # CAM target per device, recorded only under a known controller line. The
+    # number is controller-local: the same target on another HBA is another
+    # device.
+    targets: dict[str, str] = field(default_factory=dict)
 
 
 
@@ -553,6 +557,7 @@ def parse_camcontrol_devlist(output: str) -> CamcontrolInfo:
     info = CamcontrolInfo()
     current_controller: str | None = None
     device_rows: list[list[str]] = []
+    conflicting_targets: set[str] = set()
 
     for line in output.splitlines():
         bus_match = re.match(r"^(?:scbus|umass-sim)\d+\s+on\s+(?P<controller>\S+)\s+bus\s+\d+:", line.strip(), re.IGNORECASE)
@@ -578,6 +583,15 @@ def parse_camcontrol_devlist(output: str) -> CamcontrolInfo:
                 info.models[normalized.lower()] = model
                 if current_controller:
                     info.controllers[normalized.lower()] = current_controller
+                    target = match.group("target")
+                    key = normalized.lower()
+                    # A device listed with two targets has no usable identity.
+                    if key not in conflicting_targets:
+                        if target.isdigit() and info.targets.get(key, target) == target:
+                            info.targets[key] = target
+                        else:
+                            info.targets.pop(key, None)
+                            conflicting_targets.add(key)
         if parsed_devices:
             device_rows.append(parsed_devices)
 

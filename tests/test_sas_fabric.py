@@ -3450,6 +3450,117 @@ class FabricPathRegressionTests(unittest.TestCase):
     def mpr_row(cls, location, device="SAS Target", target=180, enclosure="0002"):
         return f"00 {target} {cls.CORE_SAS_PORT} 000a 0002 {device} 12 {enclosure} {location} 1"
 
+    def rear_shelf_build(self, bay, *, camcontrol_target=None, rows=None, enclosures=None):
+        # Rear shelf of a cascaded JBOD: global bays 30-59 sit at MPR locations
+        # 0-29 on the rear expander, and SES numbers them one-based (bay - 29).
+        # Each MPR row's target is 150 + its location.
+        if rows is None:
+            rows = [self.mpr_row(location, target=150 + location) for location in range(30)]
+        slot = self.slot(
+            bay, device_name="da5",
+            multipath=MultipathView(name="synthetic", device_name="multipath/synthetic", members=[
+                MultipathMember(device_name="da5", controller_label="mpr0", state="ACTIVE")]),
+            raw_status={"enclosure_id": self.CORE_ENCLOSURE, "ses_slot_number": bay - 29},
+        )
+        own, neighbour = 150 + (bay - 30), 150 + (bay - 29)
+        events = [f"mpr0: Controller reported scsi ioc terminated tgt {own} SMID 1 loginfo 31120302"]
+        events += [f"mpr0: Controller reported scsi ioc terminated tgt {neighbour} SMID {n} loginfo 31120302" for n in (2, 3, 4)]
+        outputs = {
+            "mprutil show adapters": MPR_ADAPTERS,
+            "mprutil -u 0 show enclosures": enclosures or f"36 {self.CORE_ENCLOSURE} 0008 0002 SES",
+            "mprutil -u 0 show devices": "\n".join(rows),
+            CORE_MPR_DMESG_EVENTS_COMMAND: "\n".join(events),
+        }
+        if camcontrol_target is not None:
+            outputs["camcontrol devlist -v"] = (
+                "scbus12 on mpr0 bus 0:\n"
+                f"<Synthetic disk 0001>  at scbus12 target {camcontrol_target} lun 0 (da5,pass5)"
+            )
+        fabric = self.build([slot], "core", outputs)
+        return next(t for t in fabric.traces if t.id == f"bay:{bay}").metrics["mpr_devices"]
+
+    def test_rear_shelf_bay_joins_its_own_mpr_row_by_cam_target(self):
+        # #936: the bay's member disk is CAM target 150 + (bay - 30) on mpr0.
+        for bay in (30, 33, 57, 59):
+            with self.subTest(bay=bay):
+                members = self.rear_shelf_build(bay, camcontrol_target=150 + (bay - 30))
+                self.assertEqual([item["mpr_slot"] for item in members], [str(bay - 30)])
+                # Its own one event, not the next bay's three.
+                self.assertEqual(members[0]["diagnostics"]["ioc_terminated_count"], 1)
+
+    def test_rear_shelf_bay_without_cam_identity_attaches_nothing(self):
+        # SES numbering is one-based; the MPR location is zero-based per
+        # expander. Without identity evidence the bay must not take the next
+        # bay's row.
+        for bay in (30, 33, 57):
+            with self.subTest(bay=bay):
+                self.assertEqual(self.rear_shelf_build(bay), [])
+        slot = self.slot(33, raw_status={"enclosure_id": self.CORE_ENCLOSURE, "ses_slot_number": 4})
+        self.assertEqual(_slot_location_number_candidates(slot), [33])
+
+    def test_cam_target_join_refuses_contradictory_or_foreign_rows(self):
+        rows = [self.mpr_row(location, target=150 + location) for location in range(30)]
+        cases = {
+            # Two rows claim the member's target.
+            "duplicate target": rows + [self.mpr_row(9, target=153)],
+            # The member's target row sits on another enclosure.
+            "other enclosure": [row for row in rows if " 153 " not in row] + [self.mpr_row(3, target=153, enclosure="0012")],
+            # The controller reports targets, but not the member's.
+            "target missing": [row for row in rows if " 153 " not in row],
+            # The row names a different disk.
+            "named other disk": [row for row in rows if " 153 " not in row] + [self.mpr_row(3, "SAS Target da6", target=153)],
+        }
+        enclosures = f"36 {self.CORE_ENCLOSURE} 0008 0002 SES\n36 {3:016x} 0008 0012 SES"
+        for name, case_rows in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.rear_shelf_build(33, camcontrol_target=153, rows=case_rows, enclosures=enclosures),
+                    [],
+                )
+
+    def test_cam_target_on_another_controller_is_not_this_paths_identity(self):
+        # da5 is target 153 on mpr1; the member path is on mpr0, so the mpr0
+        # row with target 153 says nothing about it.
+        members = self.rear_shelf_build(33, camcontrol_target=None)
+        self.assertEqual(members, [])
+        fabric_members = self.rear_shelf_build_with_cam(33, "scbus13 on mpr1 bus 0:\n<Synthetic disk 0001>  at scbus13 target 153 lun 0 (da5,pass5)")
+        self.assertEqual(fabric_members, [])
+
+    def rear_shelf_build_with_cam(self, bay, camcontrol):
+        rows = [self.mpr_row(location, target=150 + location) for location in range(30)]
+        slot = self.slot(
+            bay, device_name="da5",
+            multipath=MultipathView(name="synthetic", device_name="multipath/synthetic", members=[
+                MultipathMember(device_name="da5", controller_label="mpr0", state="ACTIVE")]),
+            raw_status={"enclosure_id": self.CORE_ENCLOSURE, "ses_slot_number": bay - 29},
+        )
+        fabric = self.build([slot], "core", {
+            "mprutil show adapters": MPR_ADAPTERS,
+            "mprutil -u 0 show enclosures": f"36 {self.CORE_ENCLOSURE} 0008 0002 SES",
+            "mprutil -u 0 show devices": "\n".join(rows),
+            "camcontrol devlist -v": camcontrol,
+        })
+        return next(t for t in fabric.traces if t.id == f"bay:{bay}").metrics["mpr_devices"]
+
+    def test_front_shelf_bay_still_matches_with_and_without_cam_identity(self):
+        rows = "\n".join(self.mpr_row(location, target=150 + location) for location in range(30))
+        for camcontrol in (None, "scbus12 on mpr0 bus 0:\n<Synthetic disk 0001>  at scbus12 target 155 lun 0 (da5,pass5)"):
+            with self.subTest(camcontrol=bool(camcontrol)):
+                outputs = {
+                    "mprutil show adapters": MPR_ADAPTERS,
+                    "mprutil -u 0 show enclosures": f"36 {self.CORE_ENCLOSURE} 0008 0002 SES",
+                    "mprutil -u 0 show devices": rows,
+                }
+                if camcontrol:
+                    outputs["camcontrol devlist -v"] = camcontrol
+                slot = self.slot(5, device_name="da5",
+                    multipath=MultipathView(name="synthetic", device_name="multipath/synthetic", members=[
+                        MultipathMember(device_name="da5", controller_label="mpr0", state="ACTIVE")]),
+                    raw_status={"enclosure_id": self.CORE_ENCLOSURE, "ses_slot_number": 6})
+                fabric = self.build([slot], "core", outputs)
+                members = next(t for t in fabric.traces if t.id == "bay:5").metrics["mpr_devices"]
+                self.assertEqual([item["mpr_slot"] for item in members], ["5"])
+
     def test_missing_exact_mpr_location_does_not_attach_neighbor_diagnostics(self):
         fabric = self.core_build(5, 5, self.mpr_row(4))
         bay = next(trace for trace in fabric.traces if trace.id == "bay:5")
