@@ -14436,14 +14436,18 @@ class InventoryService:
             for path in paths
             if isinstance(path.get("identify_active"), bool)
         ]
-        identify_active = any(observed) if observed else None
+        every_path_read = bool(observed) and len(observed) == len(paths)
+        # One path reading "on" means the light is on. "Off" needs every path:
+        # an unread path may still be lighting it, so that state is unknown.
+        if any(observed):
+            identify_active: bool | None = True
+        elif every_path_read:
+            identify_active = False
+        else:
+            identify_active = None
         return {
             "identify_active": identify_active,
-            "confirmed": bool(
-                observed
-                and len(observed) == len(paths)
-                and identify_active is requested_active
-            ),
+            "confirmed": every_path_read and identify_active is requested_active,
             "readback_supported": True,
             "paths": paths,
         }

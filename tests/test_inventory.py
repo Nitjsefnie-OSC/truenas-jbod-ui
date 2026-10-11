@@ -18424,6 +18424,31 @@ ses1:
             1,
         )
 
+    def test_partial_led_readback_reports_off_only_when_every_path_was_read(self) -> None:
+        # One path read "off" and the other could not be read: the light may
+        # still be on through the unread path, so the state is unknown.
+        def result(*states):
+            paths = [
+                {"ses_device": f"/dev/sg{index}", "ses_element_id": 7, "identify_active": state}
+                for index, state in enumerate(states)
+            ]
+            return InventoryService._led_readback_result(True, paths)
+
+        partial_off = result(False, None)
+        self.assertIsNone(partial_off["identify_active"])
+        self.assertFalse(partial_off["confirmed"])
+        partial_on = result(True, None)
+        self.assertTrue(partial_on["identify_active"])
+        self.assertFalse(partial_on["confirmed"])
+        all_off = InventoryService._led_readback_result(
+            False,
+            [{"identify_active": False}, {"identify_active": False}],
+        )
+        self.assertIs(all_off["identify_active"], False)
+        self.assertTrue(all_off["confirmed"])
+        self.assertIsNone(result(None, None)["identify_active"])
+        self.assertIs(result(True, True)["confirmed"], True)
+
     async def test_api_led_backend_returns_an_explicit_unconfirmed_result(self) -> None:
         slot = SlotView(
             slot=0, slot_label="00", row_index=0, column_index=0,
