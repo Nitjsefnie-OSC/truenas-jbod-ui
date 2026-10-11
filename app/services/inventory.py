@@ -94,6 +94,8 @@ from app.services.sas_fabric_alias_store import SasFabricAliasStore
 from app.services.quantastor_cli import build_quantastor_cli_invocation
 from app.services.quantastor_api import QuantastorRESTClient
 from app.services.parsers import (
+    fixed_device_sg_ses_note,
+    fixed_device_sg_ses_reads,
     MultipathInfo,
     ParsedSSHData,
     ZpoolMember,
@@ -4278,6 +4280,8 @@ class InventoryService:
             with perf_stage("inventory.api.fetch_all", platform=self.system.truenas.platform):
                 return await self.truenas_client.fetch_all()
 
+        skipped_sg_ses_reads = fixed_device_sg_ses_reads(self.system.truenas.platform, list(self.system.ssh.commands))
+
         async def load_ssh_payload() -> tuple[dict[str, str], bool, list[str], list[dict[str, Any]], SourceStatus]:
             with perf_stage("inventory.ssh.run_commands"):
                 ssh_started = time.perf_counter()
@@ -4287,6 +4291,16 @@ class InventoryService:
                             self._ssh_inventory_enrichment_probe_commands,
                             initial_commands=self._esxi_storcli_initial_commands(),
                         )
+                    )
+                elif skipped_sg_ses_reads:
+                    # Device discovery reads every enclosure; a saved /dev/sgN
+                    # read can point at a disk or CD-ROM after a renumbering.
+                    command_results = await self.ssh_probe.run_planned_commands(
+                        self._ssh_inventory_enrichment_probe_commands,
+                        initial_commands=[
+                            command for command in self.system.ssh.commands
+                            if command not in skipped_sg_ses_reads
+                        ],
                     )
                 else:
                     command_results = await self.ssh_probe.run_planned_commands(
@@ -4389,6 +4403,8 @@ class InventoryService:
             else:
                 sources["ssh"] = ssh_status
                 warnings.extend(ssh_failures)
+                if skipped_sg_ses_reads:
+                    warnings.append(fixed_device_sg_ses_note(len(skipped_sg_ses_reads)))
 
         if bmc_task is not None:
             try:

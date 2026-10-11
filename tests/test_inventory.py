@@ -1354,6 +1354,54 @@ class InventorySSHRequiredCommandTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.services.inventory.logger.exception"):
             return await service._collect_inventory_source_bundle()
 
+    FIXED_SG_SES_COMMANDS = [
+        "sudo -n /usr/bin/sg_ses -p aes /dev/sg27",
+        "sudo -n /usr/bin/sg_ses -p aes /dev/sg38",
+        "sudo -n /usr/bin/sg_ses -p ec /dev/sg27",
+        "sudo -n /usr/bin/sg_ses --join --filter /dev/sg38",
+    ]
+    KEPT_COMMANDS = ["/usr/sbin/zpool status -gP", "/usr/bin/lsscsi -g"]
+
+    async def _saved_sg_ses_bundle(self, platform):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        system = SystemConfig(
+            id=f"synthetic-{platform}",
+            truenas=TrueNASConfig(platform=platform),
+            ssh=SSHConfig(enabled=True, host="192.0.2.10", commands=[*self.KEPT_COMMANDS, *self.FIXED_SG_SES_COMMANDS]),
+        )
+        ssh = AsyncMock()
+        ssh.run_planned_commands.return_value = [
+            SSHCommandResult(command=command, ok=True, stdout="", exit_code=0) for command in self.KEPT_COMMANDS
+        ]
+        service = build_inventory_service(Settings(), system, AsyncMock(), ssh, directory.name)
+        service._fetch_scale_ses_overlay = AsyncMock(return_value=(ParsedSSHData(), []))
+        service._fetch_quantastor_cli_overlay = AsyncMock(return_value=({}, []))
+        service._fetch_quantastor_ses_overlay = AsyncMock(return_value=(ParsedSSHData(), []))
+        with patch("app.services.inventory.logger.exception"):
+            bundle = await service._collect_inventory_source_bundle()
+        return bundle, ssh.run_planned_commands
+
+    async def test_discovery_platforms_skip_saved_fixed_device_sg_ses_reads(self):
+        # SCALE and QuantaStor find their enclosure devices on every refresh;
+        # a saved read of one /dev/sgN goes stale when sg numbers move.
+        for platform in ("scale", "quantastor"):
+            with self.subTest(platform=platform):
+                bundle, planned = await self._saved_sg_ses_bundle(platform)
+                planned.assert_awaited_once()
+                self.assertEqual(planned.await_args.kwargs.get("initial_commands"), self.KEPT_COMMANDS)
+                notes = [warning for warning in bundle.warnings if "fixed /dev/sgN" in warning]
+                self.assertEqual(len(notes), 1, bundle.warnings)
+                self.assertIn("4 saved SSH commands", notes[0])
+                self.assertNotIn("/dev/sg27", notes[0])
+
+    async def test_generic_linux_keeps_saved_sg_ses_reads(self):
+        # Generic Linux has no enclosure discovery: saved reads are its only source.
+        bundle, planned = await self._saved_sg_ses_bundle("linux")
+        planned.assert_awaited_once()
+        self.assertIsNone(planned.await_args.kwargs.get("initial_commands"))
+        self.assertFalse(any("fixed /dev/sgN" in warning for warning in bundle.warnings), bundle.warnings)
+
     async def test_unvr_shape_missing_lsscsi_keeps_required_commands_ok(self):
         bundle = await self._bundle("linux", [
             SSHCommandResult(command="/usr/bin/lsblk -OJ", ok=True, stdout='{"blockdevices": []}', exit_code=0),

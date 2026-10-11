@@ -205,6 +205,26 @@ errors: No known data errors
                 self.assertEqual(parsed[key].topology_label, "tank > spares > spare")
         self.assertEqual(parsed["gptid/data-a"].vdev_name, "raidz2-0")
 
+    def test_fixed_device_sg_ses_reads_are_recognised(self) -> None:
+        from app.services.parsers import is_fixed_device_sg_ses_read
+
+        for command in (
+            "sudo -n /usr/bin/sg_ses -p aes /dev/sg27",
+            "sudo -n /usr/bin/sg_ses -p ec /dev/sg38",
+            "sudo -n /usr/bin/sg_ses --join --filter /dev/sg26",
+            "/usr/bin/sg_ses -p aes /dev/sg4095",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(is_fixed_device_sg_ses_read(command))
+        for command in (
+            "sudo -n /usr/bin/sg_ses --dev-slot-num=0 --set=ident /dev/sg26",
+            "/usr/bin/lsscsi -g",
+            "sudo -n /usr/sbin/sesutil map",
+            "sudo -n /usr/bin/sg_ses -p aes",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(is_fixed_device_sg_ses_read(command))
+
     def test_canonicalize_sg_ses_command_preserves_target_device(self) -> None:
         command = "sudo -n /usr/bin/sg_ses -p aes /dev/sg27"
 
