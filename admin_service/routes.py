@@ -109,7 +109,7 @@ from app.services.credential_authority import (
 )
 from app.services.demo_system_factory import DemoSystemFactory
 from app.services.inventory_registry import InventoryRegistry
-from app.services.parsers import normalize_text
+from app.services.parsers import fixed_device_sg_ses_note, fixed_device_sg_ses_reads, normalize_text
 from app.services.profile_builder import ProfileBuilderService
 from app.services.quantastor_api import QuantastorRESTClient
 from app.services.ssh_key_manager import SSHKeyManager
@@ -224,6 +224,7 @@ def build_router(admin_settings: Any) -> APIRouter:
         before: Any,
         after: Any,
         lead: str,
+        note: str | None = None,
     ) -> JSONResponse:
         """Answer a config save, saying whether the main UI applies it on its next request.
 
@@ -246,6 +247,8 @@ def build_router(admin_settings: Any) -> APIRouter:
                 f"{lead} The main UI applies it when it next handles a page or API request; "
                 "no restart needed."
             )
+        if note:
+            content["detail"] = f"{content['detail']} {note}"
         content["runtime"] = await build_runtime_payload(runtime_service)
         return JSONResponse(content)
 
@@ -931,6 +934,7 @@ def build_router(admin_settings: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         refreshed_settings = reload_app_settings()
+        skipped_sg_ses_reads = fixed_device_sg_ses_reads(saved_system.truenas.platform, list(saved_system.ssh.commands))
         return await config_mutation_response(
             {
                 "ok": True,
@@ -946,6 +950,7 @@ def build_router(admin_settings: Any) -> APIRouter:
             before=settings,
             after=refreshed_settings,
             lead="Saved.",
+            note=fixed_device_sg_ses_note(len(skipped_sg_ses_reads)) if skipped_sg_ses_reads else None,
         )
 
     @router.post("/api/admin/system-setup/demo")

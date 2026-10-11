@@ -3919,6 +3919,35 @@ def _lookup_simple_ssh_command(executable: str, args: list[str]) -> str | None:
     return SIMPLE_SSH_EXECUTABLES.get(executable)
 
 
+# Platforms that find their SES devices on every refresh (`sg_ses -p aes` on
+# each /dev/sg*), so a saved read of one fixed /dev/sgN adds nothing and goes
+# stale when sg numbers move after a reboot or disk change.
+SG_SES_DISCOVERY_PLATFORMS = frozenset({"scale", "quantastor"})
+
+
+def is_fixed_device_sg_ses_read(command: str) -> bool:
+    """True for a saved `sg_ses` page read (aes, ec or join) of one /dev/sgN."""
+    canonical = canonicalize_ssh_command(command)
+    return canonical.startswith(("sg_ses aes /dev/sg", "sg_ses ec /dev/sg", "sg_ses join /dev/sg"))
+
+
+def fixed_device_sg_ses_reads(platform: str | None, commands: list[str]) -> list[str]:
+    """Saved commands the app skips on `platform` because device discovery covers them."""
+    if (normalize_text(platform) or "") not in SG_SES_DISCOVERY_PLATFORMS:
+        return []
+    return [command for command in commands if is_fixed_device_sg_ses_read(command)]
+
+
+def fixed_device_sg_ses_note(count: int) -> str:
+    noun = "command reads" if count == 1 else "commands read"
+    them = "it" if count == 1 else "them"
+    return (
+        f"{count} saved SSH {noun} SES pages from a fixed /dev/sgN device. This system finds its "
+        f"enclosure devices on every refresh and sg numbers can change after a reboot, so the app skips "
+        f"{them}. Remove {them} from the system's SSH command list."
+    )
+
+
 def canonicalize_ssh_command(command: str) -> str:
     """
     Normalize SSH command strings into stable parser keys.

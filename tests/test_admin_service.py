@@ -3506,6 +3506,36 @@ class AdminSudoPreviewRouteTests(unittest.TestCase):
         # A save applied on the main UI's next request is still journalled (#575/#580).
         journal.assert_called_once_with("runtime_overrides.save", "source_bundle_cache_ttl_seconds")
 
+    def test_system_save_notes_fixed_device_sg_ses_lines_on_discovery_platforms(self) -> None:
+        route = next(
+            route for route in admin_app.routes
+            if route.path == "/api/admin/system-setup" and "POST" in getattr(route, "methods", set())
+        )
+        commands = [
+            "/usr/bin/lsscsi -g",
+            "sudo -n /usr/bin/sg_ses -p aes /dev/sg27",
+            "sudo -n /usr/bin/sg_ses -p ec /dev/sg27",
+        ]
+        settings = Settings(config_file="/app/config/config.yaml")
+        for platform, noted in (("scale", True), ("quantastor", True), ("linux", False)):
+            with self.subTest(platform=platform):
+                saved = SystemConfig(
+                    id="synthetic", label="Synthetic", truenas=TrueNASConfig(platform=platform),
+                    ssh=SSHConfig(enabled=True, host="192.0.2.10", commands=commands),
+                )
+                setup_service = MagicMock()
+                setup_service.save_system.return_value = (saved, True)
+                with (
+                    patch("admin_service.routes.reload_app_settings", side_effect=[settings, settings]),
+                    patch("admin_service.routes.SystemSetupService", return_value=setup_service),
+                    patch("admin_service.routes.get_runtime_service", return_value=MagicMock()),
+                    patch("admin_service.routes.build_runtime_payload", new=AsyncMock(return_value={})),
+                ):
+                    response = asyncio.run(route.endpoint(MagicMock()))
+                detail = json.loads(response.body)["detail"]
+                self.assertEqual("2 saved SSH commands read SES pages" in detail, noted, detail)
+                self.assertNotIn("/dev/sg27", detail)
+
     def test_config_save_still_marks_restart_for_restart_only_settings(self) -> None:
         """Public origin, debug docs, perf and paths need a new main UI process (#432/#615)."""
         route = next(route for route in admin_app.routes if route.path == "/api/admin/runtime-behavior")

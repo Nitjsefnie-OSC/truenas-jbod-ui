@@ -563,32 +563,19 @@ from a root shell on the appliance.
 
 ### Recommended SCALE Sudo Allow-List
 
-If you want first-pass Linux SES mapping support, grant `jbodmap` the AES,
-enclosure-status, and joined-filter page reads for the known enclosure SG
-devices:
+Use the anchored `sg_ses` and `smartctl` grants from the generated SCALE policy
+in [SSH Setup and Sudo](../wiki/SSH-Setup-and-Sudo.md). Do not grant reads of
+specific devices such as `/dev/sg26`: `sg` numbers can change after a reboot or
+disk change, and the grant then covers a disk instead of the enclosure.
 
-```bash
-midclt call user.update USER_ID '{"sudo":true,"sudo_nopasswd":false,"sudo_commands":["/usr/bin/sg_ses -p aes /dev/sg26","/usr/bin/sg_ses -p aes /dev/sg37","/usr/bin/sg_ses -p ec /dev/sg26","/usr/bin/sg_ses -p ec /dev/sg37","/usr/bin/sg_ses --join --filter /dev/sg26","/usr/bin/sg_ses --join --filter /dev/sg37"]}'
-```
+Do not add the bare `/usr/bin/sg_ses` or `/usr/sbin/smartctl` executables to
+`Allowed sudo commands` or `Allowed Sudo Commands (No Password)`. A bare entry
+accepts any arguments, including writing SES control pages, powering off a bay
+and starting SMART self-tests. Enter the anchored lines from the generated
+policy in the no-password list and leave the password list empty; the app always
+uses `sudo -n`.
 
-That is the smallest current allow-list for read-only enclosure discovery,
-live identify-state reads, and joined slot/transport metadata on this SCALE
-host.
-
-On the tested SCALE box, the web UI allow-list also worked when
-`/usr/bin/sg_ses` was added to both:
-
-- `Allowed sudo commands`
-- `Allowed Sudo Commands (No Password)`
-
-That broader entry is enough for first-pass AES page reads, enclosure-status
-reads, and identify LED control on this tested host, but the exact command list
-above is still the safer documentation target because it keeps the granted
-surface area narrower.
-
-If you also want richer per-slot SMART data on SCALE, add `/usr/sbin/smartctl`
-to the allowed sudo commands too. That lets the app run one-off commands such
-as:
+The anchored `smartctl` grants let the app run one-off commands such as:
 
 ```bash
 sudo -n /usr/sbin/smartctl -x -j /dev/sdc
@@ -640,13 +627,14 @@ commands:
   - /usr/bin/lsscsi -g
   - /usr/bin/lsscsi -g -t
   - /usr/sbin/nvme list-subsys -o json 2>/dev/null || /usr/bin/nvme list-subsys -o json 2>/dev/null || true
-  - sudo -n /usr/bin/sg_ses -p aes /dev/sg26
-  - sudo -n /usr/bin/sg_ses -p aes /dev/sg37
-  - sudo -n /usr/bin/sg_ses -p ec /dev/sg26
-  - sudo -n /usr/bin/sg_ses -p ec /dev/sg37
-  - sudo -n /usr/bin/sg_ses --join --filter /dev/sg26
-  - sudo -n /usr/bin/sg_ses --join --filter /dev/sg37
 ```
+
+The app runs `sg_ses -p aes`, `-p ec` and `--join --filter` against every SES
+device it finds on each refresh, so those reads do not belong in the standing
+list. `sg` numbers can change after a reboot or disk change; a saved
+`/dev/sgN` line can end up reading a disk or CD-ROM. On SCALE and QuantaStor the
+app skips such saved lines and adds one refresh warning that names how many it
+skipped. The sudo rules for those reads are still needed.
 
 `smartctl` does not need to be added to the standing SSH command list above.
 The app runs it on demand for the selected slot, but the user still needs sudo

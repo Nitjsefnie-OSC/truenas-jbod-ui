@@ -23,6 +23,19 @@ ALLOWED_MISSING = {
 }
 
 
+def _example_ssh_commands() -> list[str]:
+    """Every SSH command a shipped example offers to copy, commented or not."""
+    commands: list[str] = []
+    for line in EXAMPLE_PATH.read_text(encoding="utf-8").splitlines():
+        stripped = line.lstrip("# ").strip()
+        if stripped.startswith("- ") and ("sudo " in stripped or stripped.startswith("- /")):
+            commands.append(stripped[2:].strip())
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for match in re.finditer(r"SSH_COMMANDS_JSON=(\[.*\])", env_example):
+        commands.extend(yaml.safe_load(match.group(1)))
+    return commands
+
+
 def _is_allowed_missing(path: str) -> bool:
     return path in ALLOWED_MISSING or any(path.startswith(f"{allowed}.") for allowed in ALLOWED_MISSING)
 
@@ -172,6 +185,17 @@ class EnvExampleCoverageTests(unittest.TestCase):
         for stale in ("v0.5.x", "first-pass", "conclusively old"):
             with self.subTest(stale=stale):
                 self.assertNotIn(stale, text)
+
+
+class ShippedSshCommandExampleTests(unittest.TestCase):
+    def test_shipped_examples_do_not_read_a_fixed_sg_device(self) -> None:
+        # SCALE and QuantaStor find their SES devices on every refresh and skip
+        # these saved reads; sg numbers move, so a copied line goes stale.
+        from app.services.parsers import is_fixed_device_sg_ses_read
+
+        commands = _example_ssh_commands()
+        self.assertTrue(any("lsscsi" in command for command in commands), commands)
+        self.assertEqual([command for command in commands if is_fixed_device_sg_ses_read(command)], [])
 
 
 if __name__ == "__main__":

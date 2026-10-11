@@ -74,11 +74,12 @@ ssh:
     - /usr/sbin/zpool status -gP
     - /usr/bin/lsblk -o NAME,TYPE,SIZE,MODEL,SERIAL,TRAN,HCTL
     - /usr/bin/lsscsi -g
-    - sudo -n /usr/bin/sg_ses -p aes /dev/sg27
-    - sudo -n /usr/bin/sg_ses -p aes /dev/sg38
-    - sudo -n /usr/bin/sg_ses -p ec /dev/sg27
-    - sudo -n /usr/bin/sg_ses -p ec /dev/sg38
 ```
+
+Do not add `sg_ses -p aes /dev/sgN` or `-p ec /dev/sgN` lines. The app finds
+the enclosure devices itself on every refresh, and `sg` numbers can change after
+a reboot or disk change, so a saved line can end up reading a disk instead. The
+app skips such lines on SCALE and says so in the refresh warnings.
 
 The app runs `smartctl` on demand for the selected slot, so it does not belong
 in the standing command list. The SSH account still needs the bounded sudo
@@ -120,10 +121,6 @@ systems:
         - /usr/sbin/zpool status -gP
         - /usr/bin/lsblk -o NAME,TYPE,SIZE,MODEL,SERIAL,TRAN,HCTL
         - /usr/bin/lsscsi -g
-        - sudo -n /usr/bin/sg_ses -p aes /dev/sg27
-        - sudo -n /usr/bin/sg_ses -p aes /dev/sg38
-        - sudo -n /usr/bin/sg_ses -p ec /dev/sg27
-        - sudo -n /usr/bin/sg_ses -p ec /dev/sg38
 ```
 
 A pinned profile preserves the face, tray orientation, and bay labels when

@@ -154,11 +154,10 @@ join that PCI address to the motherboard slot designation.
 /usr/sbin/zpool status -gP
 /usr/bin/lsblk -o NAME,TYPE,SIZE,MODEL,SERIAL,TRAN,HCTL
 /usr/bin/lsscsi -g
-sudo -n /usr/bin/sg_ses -p aes /dev/sg27
-sudo -n /usr/bin/sg_ses -p aes /dev/sg38
-sudo -n /usr/bin/sg_ses -p ec /dev/sg27
-sudo -n /usr/bin/sg_ses -p ec /dev/sg38
 ```
+
+SCALE and QuantaStor find their SES enclosure devices on every refresh, so the
+standing list needs no `sg_ses` lines; the app skips saved per-device ones.
 
 ## Generic Linux command ideas
 

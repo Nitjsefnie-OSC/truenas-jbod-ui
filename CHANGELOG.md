@@ -58,6 +58,12 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   cannot tell you. (#939)
 ### Fixed
 
+- SCALE and QuantaStor refreshes now skip saved `sg_ses` reads of a fixed
+  `/dev/sgN` device. The app already finds enclosure devices itself, and `sg`
+  numbers can change after a reboot, so a saved line could end up reading a
+  disk and report "Illegal request". The refresh and the admin save each say
+  how many lines were skipped. The setup docs no longer show per-device lines
+  (#944).
 - Storage Fabric now matches each bay to its controller entry by the disk's
   CAM target instead of its enclosure slot number. On a cascaded JBOD, every
   rear-shelf bay used to show the next bay's SAS address, controller row and
