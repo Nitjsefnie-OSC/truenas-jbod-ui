@@ -1154,6 +1154,12 @@ SSH_FAILURE_CONTEXTS_BY_COMMAND: dict[str, dict[str, str]] = {
         "context_label": "Linux enclosure driver slot map",
         "criticality": "enrichment",
     },
+    # Only fills the UniFi locate-light state; the bay map comes from lsblk.
+    "gpio debug": {
+        "context": "unifi_led_gpio_state",
+        "context_label": "UniFi locate-light GPIO state",
+        "criticality": "enrichment",
+    },
     # Exact, so it wins over the "mprutil " prefix below.
     "mprutil show adapters": {
         "context": "sas_fabric_adapter_discovery",
@@ -4204,6 +4210,11 @@ class InventoryService:
             outputs = {item.command: item.stdout for item in command_results if item.ok}
             failure_messages, status_message = self._summarize_ssh_failures(command_results, outputs)
             failure_details = self._ssh_failure_details(command_results)
+            # The bay map survives when only `enrichment` commands failed and
+            # something answered; history records on this, not on `ok` (#927).
+            required_ok = not failure_details or (
+                bool(outputs) and all(detail.get("criticality") == "enrichment" for detail in failure_details)
+            )
             return (
                 outputs,
                 True,
@@ -4213,6 +4224,7 @@ class InventoryService:
                     enabled=True,
                     ok=not failure_messages,
                     message=status_message,
+                    required_ok=required_ok,
                 ),
             )
 
@@ -4278,7 +4290,7 @@ class InventoryService:
                 ssh_outputs, ssh_collected, ssh_failures, ssh_failure_details, ssh_status = await ssh_task
             except Exception as exc:
                 logger.exception("Failed to collect SSH diagnostics")
-                sources["ssh"] = SourceStatus(enabled=True, ok=False, message=str(exc))
+                sources["ssh"] = SourceStatus(enabled=True, ok=False, message=str(exc), required_ok=False)
                 warnings.append("SSH is turned on but no command output came back.")
             else:
                 sources["ssh"] = ssh_status
