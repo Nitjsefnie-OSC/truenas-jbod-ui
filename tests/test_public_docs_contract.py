@@ -915,6 +915,8 @@ class PublicDocsContractTests(unittest.TestCase):
             "RELEASE_WRAP_0.24.0-beta.1.md",
             "RELEASE_NOTES_0.24.0-beta.2.md",
             "RELEASE_WRAP_0.24.0-beta.2.md",
+            "RELEASE_NOTES_0.24.0-beta.3.md",
+            "RELEASE_WRAP_0.24.0-beta.3.md",
         }
         unlinked = [
             path.name
