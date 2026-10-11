@@ -1321,6 +1321,24 @@ class InventorySSHRequiredCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("The bay map still works" in warning for warning in bundle.warnings), bundle.warnings)
         self.assertIs(ssh.model_dump(mode="json")["required_ok"], True)
 
+    async def test_unvr_shape_failed_gpio_debug_read_keeps_required_commands_ok(self):
+        # The GPIO read only fills the locate-light state; the bay map comes
+        # from lsblk. A host without debugfs must still be recorded.
+        bundle = await self._bundle("linux", [
+            SSHCommandResult(command="/usr/bin/lsblk -OJ", ok=True, stdout='{"blockdevices": []}', exit_code=0),
+            SSHCommandResult(
+                command="cat /sys/kernel/debug/gpio",
+                ok=False,
+                stderr="cat: /sys/kernel/debug/gpio: No such file or directory",
+                exit_code=1,
+            ),
+        ])
+        ssh = bundle.sources["ssh"]
+        self.assertFalse(ssh.ok)
+        self.assertIs(ssh.required_ok, True)
+        details = [detail for detail in bundle.ssh_failure_details if detail.get("canonical_command") == "gpio debug"]
+        self.assertEqual([detail.get("criticality") for detail in details], ["enrichment"])
+
     async def test_failed_bay_map_command_is_a_required_failure(self):
         bundle = await self._bundle("linux", [
             SSHCommandResult(command="/usr/bin/lsblk -OJ", ok=False, stderr="lsblk: permission denied", exit_code=1),

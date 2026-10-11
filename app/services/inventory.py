@@ -1140,6 +1140,12 @@ SSH_FAILURE_CONTEXTS_BY_COMMAND: dict[str, dict[str, str]] = {
         "context_label": "Linux enclosure driver slot map",
         "criticality": "enrichment",
     },
+    # Only fills the UniFi locate-light state; the bay map comes from lsblk.
+    "gpio debug": {
+        "context": "unifi_led_gpio_state",
+        "context_label": "UniFi locate-light GPIO state",
+        "criticality": "enrichment",
+    },
     # Exact, so it wins over the "mprutil " prefix below.
     "mprutil show adapters": {
         "context": "sas_fabric_adapter_discovery",
