@@ -22,7 +22,7 @@
     "test_changelog_entry_gate": 23,
     "test_ci_contract": 48,
     "test_compose_runtime_matrix": 43,
-    "test_config_example": 8,
+    "test_config_example": 9,
     "test_container_contract": 64,
     "test_dev_check": 32,
     "test_disk_inventory_sync": 20,

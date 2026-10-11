@@ -216,14 +216,11 @@ admin:
 #         - /usr/bin/lsblk --json --bytes --output NAME,KNAME,PATH,TYPE,SIZE,MODEL,SERIAL,WWN,TRAN,HCTL,PKNAME,MOUNTPOINTS,FSTYPE,UUID,PARTUUID,LOG-SEC,PHY-SEC
 #         - /usr/bin/lsscsi -g
 #         - /usr/bin/lsscsi -g -t
-#         # Optional if you allow limited Linux SES reads for enclosure discovery:
-#         - sudo -n /usr/bin/sg_ses -p aes /dev/sg26
-#         - sudo -n /usr/bin/sg_ses -p aes /dev/sg37
-#         - sudo -n /usr/bin/sg_ses --join --filter /dev/sg26
-#         - sudo -n /usr/bin/sg_ses --join --filter /dev/sg37
-#         # Optional if you also want the UI to refresh live identify LED state:
-#         - sudo -n /usr/bin/sg_ses -p ec /dev/sg26
-#         - sudo -n /usr/bin/sg_ses -p ec /dev/sg37
+#         # No sg_ses lines: the app finds the SES enclosure devices on every
+#         # refresh and reads their AES, EC and join pages itself. sg numbers
+#         # can change after a reboot, so a saved /dev/sgN line goes stale; the
+#         # app skips such lines on SCALE and QuantaStor. The SSH user still
+#         # needs the anchored sg_ses sudo rules from the generated policy.
 #         # smartctl does not need to live in the standing command list; the app
 #         # runs it on demand for the selected disk, but the user still needs
 #         # sudo permission for /usr/sbin/smartctl on the SCALE host.
