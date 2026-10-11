@@ -95,8 +95,75 @@ test("locate completion keeps and patches the originating result after a scope c
 
   assert.equal(state.snapshot.slots[0].identify_active, false, "the newly selected scope is untouched");
   assert.equal(state.snapshotReuseCache["a::one"].slots[0].identify_active, true);
-  assert.match(statuses.at(-1)[0], /Locate light on for slot 00/);
+  // Slot labels repeat across shelves, so a late result names where it came from.
+  assert.match(statuses.at(-1)[0], /^a \/ one: Locate light on for slot 00/);
   assert.equal(state.mutationResults[JSON.stringify([JSON.stringify(["a", "one"]), "sendLedAction"])].succeeded, true);
+});
+
+for (const outcome of ["confirmed", "unconfirmed", "failed"]) {
+  test(`a late ${outcome} locate result names its origin shelf after a scope change`, async () => {
+    const pending = deferred();
+    const statuses = [];
+    const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+    const state = {
+      snapshotMode:false,
+      snapshot:{
+        selected_system_id:"a", selected_system_label:"Synthetic System A",
+        selected_enclosure_id:"one", selected_enclosure_label:"Shelf One", slots:[originSlot],
+      },
+      selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+      latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+      snapshotReuseCache:{}, mutationsInFlight:{}, mutationResults:{},
+    };
+    const context = {
+      state, URLSearchParams,
+      writeBlockedByPolicy:()=>false,
+      getSlotById:()=>originSlot,
+      setStatus(message, tone){ statuses.push([message, tone || "info"]); },
+      sendScopedRequest:async()=>pending.promise,
+      applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+      handleWriteRejection(){},
+    };
+    const c = load(["cloneJsonValue", "snapshotReuseCacheKey", ...guardNames, "sendLedAction"], context);
+    const run = c.sendLedAction("IDENTIFY");
+    await new Promise(resolve=>setImmediate(resolve));
+    state.selectedEnclosureId = "two";
+    state.snapshot = {selected_system_id:"a", selected_enclosure_id:"two", slots:[{slot:0, slot_label:"00"}]};
+    if (outcome === "failed") pending.reject(new Error("synthetic failure"));
+    else pending.resolve({
+      ok:true, system_id:"a", enclosure_id:"one", slot:0, slot_label:"00", requested_active:true,
+      identify_active:outcome === "confirmed" ? true : null, confirmed:outcome === "confirmed" ? true : null,
+    });
+    await run;
+
+    const [message] = statuses.at(-1);
+    assert.match(message, /^Synthetic System A \/ Shelf One: /);
+    assert.match(message, /slot 00/);
+  });
+}
+
+test("a locate result in the same scope keeps its plain message", async () => {
+  const statuses = [];
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+  const state = {
+    snapshotMode:false,
+    snapshot:{selected_system_id:"a", selected_system_label:"Synthetic System A", selected_enclosure_id:"one", slots:[originSlot]},
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(message, tone){ statuses.push([message, tone || "info"]); },
+    sendScopedRequest:async()=>({ok:true, slot:0, requested_active:true, identify_active:true, confirmed:true}),
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", ...guardNames, "sendLedAction"], context);
+  await c.sendLedAction("IDENTIFY");
+  assert.equal(statuses.at(-1)[0], "Locate light on for slot 00, confirmed through synthetic enclosure.");
 });
 
 test("locate completion patches the newest snapshot after a same-scope refresh", async () => {

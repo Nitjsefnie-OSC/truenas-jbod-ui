@@ -10670,6 +10670,16 @@
     const mutation = captureMutationContext("sendLedAction");
     if (!mutation) return;
     const originSnapshot = cloneJsonValue(state.snapshot);
+    const originLabel = [
+      originSnapshot?.selected_system_label || originSnapshot?.selected_system_id || mutation.systemId,
+      originSnapshot?.selected_enclosure_label || originSnapshot?.selected_enclosure_id,
+    ].filter(Boolean).join(" / ");
+    // Slot labels repeat across shelves. A result that lands after the
+    // operator moved to another system or enclosure names where it came from.
+    const reportLocate = (message, tone) => {
+      const stillCurrent = mutation.scope === currentUiScopeKey() && inventoryScopeMatchesSelection();
+      setStatus(stillCurrent || !originLabel ? message : `${originLabel}: ${message}`, tone);
+    };
     let retainedSnapshot = null;
     let succeeded = false;
     try {
@@ -10700,15 +10710,15 @@
 
       const requestedState = payload.requested_active === false ? "off" : "on";
       if (payload.confirmed === true) {
-        setStatus(`Locate light ${requestedState} for slot ${slot.slot_label}, confirmed through ${locateLightSourceLabel(slot)}.`);
+        reportLocate(`Locate light ${requestedState} for slot ${slot.slot_label}, confirmed through ${locateLightSourceLabel(slot)}.`);
       } else if (payload.confirmed === false) {
-        setStatus(`The enclosure did not confirm the locate light is ${requestedState} for slot ${slot.slot_label}.`, "warning");
+        reportLocate(`The enclosure did not confirm the locate light is ${requestedState} for slot ${slot.slot_label}.`, "warning");
       } else {
-        setStatus(`The locate light request was sent for slot ${slot.slot_label}, but this system cannot confirm it immediately.`, "warning");
+        reportLocate(`The locate light request was sent for slot ${slot.slot_label}, but this system cannot confirm it immediately.`, "warning");
       }
     } catch (error) {
       handleWriteRejection(error);
-      setStatus(`Could not change the locate light for slot ${slot.slot_label}: ${error.message || error}`, "error");
+      reportLocate(`Could not change the locate light for slot ${slot.slot_label}: ${error.message || error}`, "error");
     } finally {
       finishMutationContext(mutation, succeeded);
       if (retainedSnapshot) {
