@@ -19290,6 +19290,49 @@ ses1:
 
         service.get_snapshot.assert_awaited_once_with(selected_enclosure_id="shelf-a")
 
+    async def test_sg_ses_moved_second_host_after_a_failed_first_host_does_not_claim_a_switch(self) -> None:
+        slot = self.sg_slot(enclosure_id="synthetic-shelf-a")
+        slot.ssh_ses_targets = [
+            {**slot.ssh_ses_targets[0], "ssh_host": "node-a.example.test"},
+            {**slot.ssh_ses_targets[0], "ssh_host": "node-b.example.test", "ses_device": "/dev/sg9"},
+        ]
+        slot.led_backend = "quantastor_sg_ses"
+        service = self.led_service("quantastor", slot)
+        sent: list[tuple[str, str]] = []
+
+        async def run(host, commands, *, then=None):
+            # node-a passes its shelf check but its locate command fails;
+            # node-b now reports another shelf.
+            results = []
+            pending = list(commands)
+            while pending:
+                for command in pending:
+                    sent.append((host, command))
+                    if " -p aes " in command:
+                        shelf = "synthetic-shelf-a" if host == "node-a.example.test" else "synthetic-shelf-b"
+                        result = SSHCommandResult(command=command, ok=True, stdout=sg_aes_header(shelf), exit_code=0)
+                    elif "--set=ident" in command:
+                        result = SSHCommandResult(command=command, ok=False, stderr="synthetic failure", exit_code=1)
+                    else:
+                        result = SSHCommandResult(command=command, ok=True, exit_code=0)
+                    results.append((result, 0.01))
+                if then is None:
+                    break
+                pending, then = then([result for result, _duration in results]), None
+            return results
+
+        service._run_led_ssh_sequence = AsyncMock(side_effect=run)
+        service.schedule_led_snapshot_refresh = Mock()
+
+        with self.assertRaises(inventory_module.LedTargetMovedError) as refused:
+            await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        message = str(refused.exception)
+        self.assertNotIn("was switched through", message)
+        self.assertIn("was not switched", message)
+        self.assertIn("synthetic failure", message)
+        self.assertFalse(any("--set=ident" in command for host, command in sent if host == "node-b.example.test"))
+
     async def test_locate_without_a_recorded_shelf_rereads_the_snapshot_first(self) -> None:
         # A shelf whose SES pages report no enclosure ID cannot be checked in
         # the session, so a remembered target is not trusted: the press reads

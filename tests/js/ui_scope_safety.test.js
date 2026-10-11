@@ -247,7 +247,41 @@ test("a late locate reply leaves another shelf's automatic entry alone", async (
   pending.resolve({ok:true, slot:0, requested_active:true, identify_active:true, confirmed:true});
   await run;
 
-  assert.notEqual(state.snapshotReuseCache["a::__auto__"]?.selected_enclosure_id, "one");
+  // The automatic entry for the other shelf survives unchanged, so the
+  // system selector can still reopen it.
+  assert.deepEqual(state.snapshotReuseCache["a::__auto__"], other);
+});
+
+test("a late locate reply drops an automatic combined view that includes the shelf", async () => {
+  const pending = deferred();
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+  const origin = {selected_system_id:"a", selected_enclosure_id:"one", last_updated:"2026-01-01T00:00:00Z", slots:[originSlot]};
+  const combined = {selected_system_id:"a", selected_enclosure_id:"one+two", last_updated:"2026-01-01T00:05:00Z", slots:[]};
+  const state = {
+    snapshotMode:false, snapshot:origin,
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{"a::one":structuredClone(origin)}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(){}, sendScopedRequest:async()=>pending.promise,
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", "snapshotUpdatedMs", ...guardNames, "sendLedAction"], context);
+  const run = c.sendLedAction("IDENTIFY");
+  await new Promise(resolve=>setImmediate(resolve));
+  state.snapshotReuseCache["a::__auto__"] = structuredClone(combined);
+  state.selectedSystemId = "b";
+  state.snapshot = {selected_system_id:"b", selected_enclosure_id:"two", slots:[]};
+  pending.resolve({ok:true, slot:0, requested_active:true, identify_active:true, confirmed:true});
+  await run;
+
+  assert.equal(state.snapshotReuseCache["a::__auto__"], undefined);
+  assert.equal(state.snapshotReuseCache["a::one"].slots[0].identify_active, true);
 });
 
 test("a locate result in the same scope keeps its plain message", async () => {

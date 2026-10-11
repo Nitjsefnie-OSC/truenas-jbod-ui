@@ -10744,14 +10744,25 @@
       const cachedBeforeFinish = retainedKey ? state.snapshotReuseCache?.[retainedKey] : null;
       const autoBeforeFinish = autoKey && autoKey !== retainedKey ? state.snapshotReuseCache?.[autoKey] : null;
       finishMutationContext(mutation, succeeded);
-      if (retainedSnapshot && !(cachedBeforeFinish
-        && snapshotUpdatedMs(cachedBeforeFinish) > snapshotUpdatedMs(retainedSnapshot))) {
+      if (retainedSnapshot) {
         state.snapshotReuseCache ||= {};
-        state.snapshotReuseCache[retainedKey] = retainedSnapshot;
-        if (autoBeforeFinish
-          && (autoBeforeFinish.selected_enclosure_id || null) === (retainedSnapshot.selected_enclosure_id || null)
-          && snapshotUpdatedMs(autoBeforeFinish) <= snapshotUpdatedMs(retainedSnapshot)) {
-          state.snapshotReuseCache[autoKey] = cloneJsonValue(retainedSnapshot);
+        const retainedStored = !(cachedBeforeFinish
+          && snapshotUpdatedMs(cachedBeforeFinish) > snapshotUpdatedMs(retainedSnapshot));
+        if (retainedStored) state.snapshotReuseCache[retainedKey] = retainedSnapshot;
+        const originScope = retainedSnapshot.selected_enclosure_id || null;
+        const autoScope = autoBeforeFinish ? autoBeforeFinish.selected_enclosure_id || null : null;
+        const scopeParts = (scope) => new Set(String(scope || "").split("+").filter(Boolean));
+        const autoParts = scopeParts(autoScope);
+        if (autoBeforeFinish && autoScope === originScope) {
+          if (retainedStored && snapshotUpdatedMs(autoBeforeFinish) <= snapshotUpdatedMs(retainedSnapshot)) {
+            state.snapshotReuseCache[autoKey] = cloneJsonValue(retainedSnapshot);
+          }
+        } else if (autoBeforeFinish && ![...scopeParts(originScope)].some((part) => autoParts.has(part))) {
+          // The automatic entry now points at another shelf of this system,
+          // which this locate did not change: keep it so the system selector
+          // can still reopen it. A combined view that includes this shelf may
+          // show the old light state, so it is dropped and refreshed instead.
+          state.snapshotReuseCache[autoKey] = autoBeforeFinish;
         }
       }
     }

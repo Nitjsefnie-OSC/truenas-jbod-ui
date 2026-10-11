@@ -14699,16 +14699,24 @@ class InventoryService:
             try:
                 results = await self._run_led_ssh_sequence(target_host, preflight_commands, then=shelf_check)
             except LedTargetMovedError as exc:
-                if not acted_on_another_path:
-                    raise
-                # An earlier path to this bay passed its own check and was
-                # switched; only this path was refused.
-                raise LedTargetMovedError(
-                    f"Bay {slot_view.slot_label}'s light was switched through one enclosure path, but another "
-                    "path no longer reports the same shelf and was left alone. Refresh the page to check it."
-                ) from exc
-            acted_on_another_path = True
+                if acted_on_another_path:
+                    # An earlier path to this bay passed its own check and its
+                    # locate command succeeded; only this path was refused.
+                    raise LedTargetMovedError(
+                        f"Bay {slot_view.slot_label}'s light was switched through one enclosure path, but another "
+                        "path no longer reports the same shelf and was left alone. Refresh the page to check it."
+                    ) from exc
+                if failures:
+                    # No path was switched: keep the earlier paths' failures visible.
+                    raise LedTargetMovedError(
+                        f"{exc} The other enclosure path also failed: " + "; ".join(failures)
+                    ) from exc
+                raise
             results = results[len(preflight_commands):]
+            # Only a successful locate command counts as switching this bay.
+            acted_on_another_path = acted_on_another_path or any(
+                action_result.ok for action_result, _duration in results[0::2]
+            )
             for index, target in enumerate(host_targets):
                 action_result, action_duration = results[index * 2]
                 readback_result, _readback_duration = results[index * 2 + 1]
