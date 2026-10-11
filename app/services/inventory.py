@@ -1244,6 +1244,11 @@ class InventoryService:
         # post-write background refresh replaces the main cache.
         self._led_slot_targets: dict[tuple[str, int], SlotView] = {}
         self._led_slot_target_sequences: dict[str, int] = {}
+        # Request sequence of the latest trusted retirement. A build that began
+        # before it cannot remember a key the newer topology no longer lists.
+        # One number instead of a record per retired id, so an appliance that
+        # reports new enclosure ids on every read cannot grow this state.
+        self._led_targets_retired_at_sequence = -1
         self._smart_cache: dict[SmartCacheKey, SmartSummaryView] = {}
         self._smart_cache_until: dict[SmartCacheKey, datetime] = {}
         self._smart_negative_cache: OrderedDict[
@@ -1764,6 +1769,11 @@ class InventoryService:
             scope_keys.add(snapshot.selected_enclosure_id)
         for scope_key in scope_keys:
             if request_sequence is not None:
+                if (
+                    request_sequence < self._led_targets_retired_at_sequence
+                    and scope_key not in (self._canonical_enclosure_options or {})
+                ):
+                    continue
                 previous_sequence = self._led_slot_target_sequences.get(scope_key, -1)
                 if previous_sequence > request_sequence:
                     continue
@@ -1944,9 +1954,9 @@ class InventoryService:
         """Drop remembered locate targets on retired enclosures.
 
         A retired shelf's old /dev/sesN can be reassigned to another shelf, so
-        a stale tab must not keep sending locate commands through it. The
-        retirement's sequence also blocks an older in-flight build from
-        remembering those targets again.
+        a stale tab must not keep sending locate commands through it. Raising
+        the retirement watermark blocks an older in-flight build from
+        remembering those targets again, without keeping a record per id.
         """
         if not enclosure_ids:
             return
@@ -1954,10 +1964,8 @@ class InventoryService:
             if target_key[0] in enclosure_ids or target.enclosure_id in enclosure_ids:
                 self._led_slot_targets.pop(target_key, None)
         for enclosure_id in enclosure_ids:
-            self._led_slot_target_sequences[enclosure_id] = max(
-                self._led_slot_target_sequences.get(enclosure_id, -1),
-                request_sequence,
-            )
+            self._led_slot_target_sequences.pop(enclosure_id, None)
+        self._led_targets_retired_at_sequence = max(self._led_targets_retired_at_sequence, request_sequence)
 
     async def get_sas_fabric_snapshot(
         self,

@@ -15046,6 +15046,46 @@ class InventoryServiceSnapshotStateBoundsTests(unittest.IsolatedAsyncioTestCase)
             self.assertEqual(set(service._canonical_enclosure_options or {}), {"enc-b", "enc-c"})
             self.assertEqual(service._canonical_default_enclosure_id, "enc-c")
 
+    async def test_retired_enclosure_tombstones_stay_bounded(self) -> None:
+        # An appliance that reports new enclosure ids on every read must not
+        # grow the locate-target bookkeeping without bound.
+        def led_slot(enclosure_id: str) -> SlotView:
+            return SlotView(
+                slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id=enclosure_id,
+                led_supported=True, led_backend="ssh", ssh_ses_device="/dev/ses0", ssh_ses_element_id=0,
+            )
+
+        def snapshot(ids: list[str]) -> InventorySnapshot:
+            return InventorySnapshot(
+                slots=[led_slot(ids[0])],
+                refresh_interval_seconds=30,
+                selected_system_id="bounded",
+                selected_system_platform="core",
+                selected_enclosure_id=ids[0],
+                enclosures=[EnclosureOption(id=enclosure_id, label=enclosure_id) for enclosure_id in ids],
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._service(temp_dir)
+            sequence = 0
+            for round_number in range(200):
+                ids = [f"enc-{round_number}-{index}" for index in range(8)]
+                sequence += 1
+                service._remember_led_snapshot(ids[0], snapshot(ids), request_sequence=sequence)
+                sequence += 1
+                self.assertTrue(service._replace_canonical_options_from_trusted_snapshot(
+                    snapshot(ids), request_sequence=sequence, default_selection=True,
+                ))
+
+            self.assertLessEqual(len(service._led_slot_target_sequences), 8)
+            # A build that began before the retirement still cannot remember
+            # a retired enclosure...
+            service._remember_led_snapshot("enc-0-0", snapshot(["enc-0-0"]), request_sequence=1)
+            self.assertIsNone(service._resolve_led_slot(0, "enc-0-0"))
+            # ...but a newer build for an enclosure that came back can.
+            service._remember_led_snapshot("enc-0-0", snapshot(["enc-0-0"]), request_sequence=sequence + 1)
+            self.assertEqual(service._resolve_led_slot(0, "enc-0-0").enclosure_id, "enc-0-0")
+
     async def test_retired_enclosure_drops_its_remembered_locate_targets(self) -> None:
         # A stale tab must not keep locating a bay on a shelf that discovery
         # retired: its old /dev/sesN may now belong to a different shelf.
