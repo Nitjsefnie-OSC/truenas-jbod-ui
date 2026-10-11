@@ -931,22 +931,60 @@ class DegradedReadSlotBoundsTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 503)
         self.service.get_slot_smart_summaries.assert_not_awaited()
 
-    def test_mutation_keeps_strict_layout_bounds_when_layout_is_unavailable(self) -> None:
+    def test_led_mutation_reports_a_busy_host_as_retryable(self) -> None:
+        from app.services.inventory import LedSessionBusyError
+
         route = _route("/api/slots/{slot}/led", "POST")
-        self.service.set_slot_led = AsyncMock()
-        payload = Mock(action="on")
+        self.service.set_slot_led = AsyncMock(
+            side_effect=LedSessionBusyError("Other locate-light requests to this system are still running. Try again in a moment.")
+        )
+        self.service.schedule_led_snapshot_refresh = Mock()
+        payload = Mock(action=Mock(value="IDENTIFY"))
 
         with (
             patch.object(app_routes, "get_inventory_registry", return_value=self.registry),
             patch.object(app_routes, "add_perf_metadata"),
         ):
             with self.assertRaises(HTTPException) as raised:
-                asyncio.run(
-                    route.endpoint(slot=5, payload=payload, system_id="system-a", enclosure_id="enc-a")
-                )
+                asyncio.run(route.endpoint(slot=5, payload=payload, system_id="system-a", enclosure_id="enc-a"))
 
         self.assertEqual(raised.exception.status_code, 503)
-        self.service.set_slot_led.assert_not_awaited()
+        self.assertEqual(raised.exception.headers, {"Retry-After": "2"})
+        self.assertIn("Try again", raised.exception.detail)
+        self.service.schedule_led_snapshot_refresh.assert_not_called()
+
+    def test_led_mutation_uses_retained_target_when_layout_read_is_unavailable(self) -> None:
+        route = _route("/api/slots/{slot}/led", "POST")
+        result = {
+            "ok": True,
+            "system_id": "system-a",
+            "enclosure_id": "enc-a",
+            "slot": 5,
+            "slot_label": "05",
+            "requested_active": True,
+            "identify_active": True,
+            "confirmed": True,
+            "readback_supported": True,
+            "paths": [],
+        }
+        self.service.set_slot_led = AsyncMock(return_value=result)
+        payload = Mock(action="on")
+
+        with (
+            patch.object(app_routes, "get_inventory_registry", return_value=self.registry),
+            patch.object(app_routes, "add_perf_metadata"),
+        ):
+            response = asyncio.run(
+                route.endpoint(slot=5, payload=payload, system_id="system-a", enclosure_id="enc-a")
+            )
+
+        self.assertEqual(json.loads(response.body), result)
+        self.service.set_slot_led.assert_awaited_once_with(
+            5,
+            payload.action,
+            selected_enclosure_id="enc-a",
+            invalidate_snapshot=False,
+        )
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from tests.mapping_fixtures import write_v1_mappings
 from app.config import (
@@ -51,6 +51,7 @@ from app.services.inventory import (
     InventoryService,
     InventorySourceBundle,
     LINUX_ENCLOSURE_SYSFS_MAP_COMMAND,
+    SnapshotStateBusyError,
     build_lunid_alias_tiers,
     build_lunid_aliases,
     effective_main_view_order,
@@ -113,6 +114,31 @@ def build_inventory_service(
     )
 
 
+def fake_led_sequence(respond):
+    """A stand-in for InventoryService._run_led_ssh_sequence that honours its `then` step.
+
+    respond(host, command) returns the stdout for one command. Every command
+    the session runs, including those `then` adds, is recorded in run.sent.
+    """
+    async def run(host, commands, *, then=None):
+        results = []
+        pending = list(commands)
+        while pending:
+            for command in pending:
+                run.sent.append((host, command))
+                results.append((SSHCommandResult(command=command, ok=True, stdout=respond(host, command), exit_code=0), 0.01))
+            if then is None:
+                break
+            pending, then = then([result for result, _duration in results]), None
+        return results
+    run.sent = []
+    return run
+
+
+def sg_aes_header(enclosure_id: str) -> str:
+    return f"  Primary enclosure logical identifier (hex): {enclosure_id}\nAdditional element status diagnostic page:\n"
+
+
 OVERLAY_STATUS_MODES = ("throw", "empty_failure", "rows_failure", "success", "empty_success")
 
 
@@ -158,12 +184,31 @@ class InventoryQualifiedAdmissionTests(unittest.IsolatedAsyncioTestCase):
                                   build_slot_candidates_from_ses_enclosures(merged.ses_enclosures, 1, None, "shelf-a")[0][0]):
                     slot = service._build_slot_view(0, 0, 0, {"id": "shelf-a"}, candidate,
                                                     None, None, ParsedSSHData(), {}, set())
-                    service._run_ssh_command = AsyncMock(side_effect=lambda command, host=None: SSHCommandResult(
-                        command=command, ok=True, stdout="", stderr="", exit_code=0))
+                    # Each node's device still reports the shelf it was found on.
+                    service._run_led_ssh_sequence = AsyncMock(side_effect=fake_led_sequence(
+                        lambda host, command: sg_aes_header("shelf-a" if host == "node-a.example.test" else "shelf-b")
+                        if " -p aes " in command else ""
+                    ))
                     await service._set_slot_led_over_ssh(slot, LedAction.identify)
-                    self.assertTrue(service._run_ssh_command.await_count)
-                    self.assertTrue(all(call.args[1] != "node-b.example.test"
-                                        for call in service._run_ssh_command.await_args_list))
+                    self.assertTrue(service._run_led_ssh_sequence.await_count)
+                    self.assertTrue(
+                        all(
+                            call.args[0] != "node-b.example.test"
+                            for call in service._run_led_ssh_sequence.await_args_list
+                        )
+                    )
+
+    def test_ses_control_targets_carry_the_shelf_their_device_reported(self):
+        for host in ("node-a.example.test", "node-b.example.test"):
+            overlay = self.overlay(host, "synthetic-shelf-a", "/dev/sg2")
+            targets = overlay.ses_slot_candidates[0]["ses_targets"]
+            self.assertEqual([target["enclosure_id"] for target in targets], ["synthetic-shelf-a"])
+        # A device seen with two different shelves in one parse names none.
+        merged = inventory_module._merge_control_targets(
+            [{"ses_device": "/dev/sg2", "ses_element_id": 0, "enclosure_id": "synthetic-shelf-a"}],
+            [{"ses_device": "/dev/sg2", "ses_element_id": 0, "enclosure_id": "synthetic-shelf-b"}],
+        )
+        self.assertIsNone(merged[0].get("enclosure_id"))
 
     def test_redundant_same_shelf_requires_the_same_physical_bay(self):
         for second_bay, expected in ((0, 2), (1, 1)):
@@ -15043,6 +15088,86 @@ class InventoryServiceSnapshotStateBoundsTests(unittest.IsolatedAsyncioTestCase)
             self.assertEqual(set(service._canonical_enclosure_options or {}), {"enc-b", "enc-c"})
             self.assertEqual(service._canonical_default_enclosure_id, "enc-c")
 
+    async def test_retired_enclosure_tombstones_stay_bounded(self) -> None:
+        # An appliance that reports new enclosure ids on every read must not
+        # grow the locate-target bookkeeping without bound.
+        def led_slot(enclosure_id: str) -> SlotView:
+            return SlotView(
+                slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id=enclosure_id,
+                led_supported=True, led_backend="ssh", ssh_ses_device="/dev/ses0", ssh_ses_element_id=0,
+            )
+
+        def snapshot(ids: list[str]) -> InventorySnapshot:
+            return InventorySnapshot(
+                slots=[led_slot(ids[0])],
+                refresh_interval_seconds=30,
+                selected_system_id="bounded",
+                selected_system_platform="core",
+                selected_enclosure_id=ids[0],
+                enclosures=[EnclosureOption(id=enclosure_id, label=enclosure_id) for enclosure_id in ids],
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._service(temp_dir)
+            sequence = 0
+            for round_number in range(200):
+                ids = [f"enc-{round_number}-{index}" for index in range(8)]
+                sequence += 1
+                service._remember_led_snapshot(ids[0], snapshot(ids), request_sequence=sequence)
+                sequence += 1
+                self.assertTrue(service._replace_canonical_options_from_trusted_snapshot(
+                    snapshot(ids), request_sequence=sequence, default_selection=True,
+                ))
+
+            self.assertLessEqual(len(service._led_slot_target_sequences), 8)
+            # A build that began before the retirement still cannot remember
+            # a retired enclosure...
+            service._remember_led_snapshot("enc-0-0", snapshot(["enc-0-0"]), request_sequence=1)
+            self.assertIsNone(service._resolve_led_slot(0, "enc-0-0"))
+            # ...but a newer build for an enclosure that came back can.
+            service._remember_led_snapshot("enc-0-0", snapshot(["enc-0-0"]), request_sequence=sequence + 1)
+            self.assertEqual(service._resolve_led_slot(0, "enc-0-0").enclosure_id, "enc-0-0")
+
+    async def test_retired_enclosure_drops_its_remembered_locate_targets(self) -> None:
+        # A stale tab must not keep locating a bay on a shelf that discovery
+        # retired: its old /dev/sesN may now belong to a different shelf.
+        def led_slot(enclosure_id: str) -> SlotView:
+            return SlotView(
+                slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id=enclosure_id,
+                led_supported=True, led_backend="ssh", ssh_ses_device="/dev/ses0", ssh_ses_element_id=0,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._service(temp_dir)
+            first = self._snapshot("enc-a").model_copy(update={"slots": [led_slot("enc-a")]})
+            retired = InventorySnapshot(
+                slots=[led_slot("enc-b")],
+                refresh_interval_seconds=30,
+                selected_system_id="bounded",
+                selected_system_platform="core",
+                selected_enclosure_id="enc-b",
+                enclosures=[EnclosureOption(id="enc-b", label="Shelf B")],
+            )
+            service._build_snapshot = AsyncMock(side_effect=[first, retired])
+            service._run_led_ssh_sequence = AsyncMock(side_effect=AssertionError("must not run a locate command"))
+
+            await service.get_snapshot(selected_enclosure_id="enc-a")
+            self.assertIsNotNone(service._resolve_led_slot(0, "enc-a"))
+
+            await service.get_snapshot(force_refresh=True, selected_enclosure_id="enc-b")
+
+            self.assertNotIn("enc-a", service._canonical_enclosure_options or {})
+            self.assertIsNone(service._resolve_led_slot(0, "enc-a"))
+            self.assertFalse(
+                [key for key, target in service._led_slot_targets.items()
+                 if key[0] == "enc-a" or target.enclosure_id == "enc-a"]
+            )
+            with self.assertRaises(TrueNASAPIError):
+                await service.set_slot_led(0, LedAction.identify, "enc-a", invalidate_snapshot=False)
+            service._run_led_ssh_sequence.assert_not_awaited()
+            # The surviving shelf still resolves.
+            self.assertEqual(service._resolve_led_slot(0, "enc-b").enclosure_id, "enc-b")
+
     async def test_unreachable_source_returns_its_snapshot_and_rediscovers_later(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = self._service(temp_dir)
@@ -17615,10 +17740,11 @@ class InventoryServiceMutationRefreshTests(unittest.IsolatedAsyncioTestCase):
             service._canonical_enclosure_options = service._canonical_enclosure_options or {}
             service._cache[inventory_module.SNAPSHOT_NO_ENCLOSURE_KEY] = snapshot
             service._cache_until[inventory_module.SNAPSHOT_NO_ENCLOSURE_KEY] = datetime.now(timezone.utc) + timedelta(seconds=30)
+            service._remember_led_snapshot(inventory_module.SNAPSHOT_NO_ENCLOSURE_KEY, snapshot)
 
             await service.set_slot_led(0, LedAction.identify, invalidate_snapshot=False)
 
-            self.assertEqual(service.get_snapshot.await_count, 1)
+            self.assertEqual(service.get_snapshot.await_count, 0)
             self.assertIn(inventory_module.SNAPSHOT_NO_ENCLOSURE_KEY, service._cache)
             self.assertEqual(truenas_client.calls, [("enc-1", 1, LedAction.identify.value)])
 
@@ -17654,6 +17780,7 @@ class InventoryServiceMutationRefreshTests(unittest.IsolatedAsyncioTestCase):
             service.get_snapshot = AsyncMock(return_value=snapshot)
             service._cache["enc-1"] = snapshot
             service._cache_until["enc-1"] = datetime.now(timezone.utc) + timedelta(seconds=30)
+            service._remember_led_snapshot("enc-1", snapshot)
             service._cache["enc-2"] = InventorySnapshot(
                 slots=[SlotView(slot=1, slot_label="01", row_index=0, column_index=1, enclosure_id="enc-2")],
                 refresh_interval_seconds=30,
@@ -17662,7 +17789,7 @@ class InventoryServiceMutationRefreshTests(unittest.IsolatedAsyncioTestCase):
             service._source_bundle = object()  # type: ignore[assignment]
             service._source_bundle_until = datetime.now(timezone.utc) + timedelta(seconds=30)
 
-            await service.set_slot_led(0, LedAction.identify)
+            await service.set_slot_led(0, LedAction.identify, selected_enclosure_id="enc-1")
 
             self.assertEqual(truenas_client.calls, [("enc-1", 1, LedAction.identify.value)])
             self.assertIsNone(service._source_bundle)
@@ -18350,7 +18477,22 @@ Consumers:
         service._run_ssh_command = AsyncMock(
             return_value=SSHCommandResult(command="", ok=True, stdout="", exit_code=0)
         )
+
+        def respond(_host, command):
+            stdout = next((output for marker, output in outputs.items() if marker in command), None)
+            if stdout is None and " -p aes " in command:
+                # The shelf check reads the AES page; every fixture page names
+                # the same synthetic shelf.
+                stdout = self.AES
+            return stdout or ""
+
+        service._led_fake = fake_led_sequence(respond)
+        service._run_led_ssh_sequence = AsyncMock(side_effect=service._led_fake)
         return service
+
+    @staticmethod
+    def led_sequence_commands(service):
+        return [command for _host, command in service._led_fake.sent]
 
     async def test_ec_only_public_snapshot_keeps_status_but_refuses_led(self):
         for platform in ("scale", "quantastor", "linux"):
@@ -18389,11 +18531,17 @@ Consumers:
                 self.assertTrue(slot.identify_active)
                 self.assertEqual(slot.ssh_ses_targets[0]["ses_slot_number"], 2)
                 for action, flag in ((LedAction.identify, "--set=ident"), (LedAction.clear, "--clear=ident")):
-                    await service.set_slot_led(slot.slot, action, invalidate_snapshot=False)
-                    service._run_ssh_command.assert_awaited_with(
-                        f"sudo -n /usr/bin/sg_ses --dev-slot-num=2 {flag} /dev/sg9", None
+                    await service.set_slot_led(
+                        slot.slot,
+                        action,
+                        selected_enclosure_id=snapshot.selected_enclosure_id,
+                        invalidate_snapshot=False,
                     )
-                self.assertEqual(service._run_ssh_command.await_count, 2)
+                    self.assertIn(
+                        f"sudo -n /usr/bin/sg_ses --dev-slot-num=2 {flag} /dev/sg9",
+                        self.led_sequence_commands(service),
+                    )
+                self.assertEqual(service._run_led_ssh_sequence.await_count, 2)
 
     def invalid_aes_outputs(self):
         return self.AES.replace(
@@ -18432,11 +18580,17 @@ Consumers:
                 anchor = next(item for item in snapshot.slots if item.ssh_ses_element_id == 0)
                 self.assertTrue(anchor.led_supported)
                 for action, flag in ((LedAction.identify, "--set=ident"), (LedAction.clear, "--clear=ident")):
-                    await service.set_slot_led(anchor.slot, action, invalidate_snapshot=False)
-                    service._run_ssh_command.assert_awaited_with(
-                        f"sudo -n /usr/bin/sg_ses --dev-slot-num=1 {flag} /dev/sg9", None,
+                    await service.set_slot_led(
+                        anchor.slot,
+                        action,
+                        selected_enclosure_id=snapshot.selected_enclosure_id,
+                        invalidate_snapshot=False,
                     )
-                self.assertEqual(service._run_ssh_command.await_count, 2)
+                    self.assertIn(
+                        f"sudo -n /usr/bin/sg_ses --dev-slot-num=1 {flag} /dev/sg9",
+                        self.led_sequence_commands(service),
+                    )
+                self.assertEqual(service._run_led_ssh_sequence.await_count, 2)
 
     async def test_invalid_aes_without_offset_remains_unavailable(self):
         invalid = self.invalid_aes_outputs().replace(
@@ -18475,13 +18629,20 @@ Consumers:
                 self.assertEqual(slot.raw_status["slot_number_source"], "ses_device_slot_number")
                 self.assertEqual(slot.ssh_ses_targets, [{
                     "ses_device": device, "ses_element_id": 1, "ses_slot_number": 2,
+                    "enclosure_id": "synthetic-enclosure",
                 }])
                 for action, flag in ((LedAction.identify, "--set=ident"), (LedAction.clear, "--clear=ident")):
-                    await service.set_slot_led(slot.slot, action, invalidate_snapshot=False)
-                    service._run_ssh_command.assert_awaited_with(
-                        f"sudo -n /usr/bin/sg_ses --dev-slot-num=2 {flag} {device}", None,
+                    await service.set_slot_led(
+                        slot.slot,
+                        action,
+                        selected_enclosure_id=snapshot.selected_enclosure_id,
+                        invalidate_snapshot=False,
                     )
-                self.assertEqual(service._run_ssh_command.await_count, 2)
+                    self.assertIn(
+                        f"sudo -n /usr/bin/sg_ses --dev-slot-num=2 {flag} {device}",
+                        self.led_sequence_commands(service),
+                    )
+                self.assertEqual(service._run_led_ssh_sequence.await_count, 2)
                 service.truenas_client.set_slot_status.assert_not_awaited()
 
     async def test_descriptor_only_join_keeps_display_but_never_plans_led(self):
@@ -18530,11 +18691,17 @@ Consumers:
                 self.assertTrue(slot.led_supported)
                 self.assertEqual(slot.ssh_ses_targets[0]["ses_slot_number"], 2)
                 for action, flag in ((LedAction.identify, "--set=ident"), (LedAction.clear, "--clear=ident")):
-                    await service.set_slot_led(slot.slot, action, invalidate_snapshot=False)
-                    service._run_ssh_command.assert_awaited_with(
-                        f"sudo -n /usr/bin/sg_ses --dev-slot-num=2 {flag} /dev/sg9", None
+                    await service.set_slot_led(
+                        slot.slot,
+                        action,
+                        selected_enclosure_id=snapshot.selected_enclosure_id,
+                        invalidate_snapshot=False,
                     )
-                self.assertEqual(service._run_ssh_command.await_count, 2)
+                    self.assertIn(
+                        f"sudo -n /usr/bin/sg_ses --dev-slot-num=2 {flag} /dev/sg9",
+                        self.led_sequence_commands(service),
+                    )
+                self.assertEqual(service._run_led_ssh_sequence.await_count, 2)
                 service.truenas_client.set_slot_status.assert_not_awaited()
 
     async def test_sg_dispatch_refuses_missing_coordinates_without_ui_fallback(self):
@@ -18564,9 +18731,18 @@ Consumers:
         snapshot = await service.get_snapshot()
         slot = snapshot.slots[0]
         self.assertTrue(slot.led_supported)
-        await service.set_slot_led(slot.slot, LedAction.identify)
-        service._run_ssh_command.assert_awaited_once_with(
-            "sudo -n /usr/sbin/sesutil locate -u /dev/ses0 7 on", None
+        await service.set_slot_led(
+            slot.slot,
+            LedAction.identify,
+            selected_enclosure_id=snapshot.selected_enclosure_id,
+        )
+        self.assertEqual(
+            self.led_sequence_commands(service),
+            [
+                "sudo -n /usr/sbin/sesutil map",
+                "sudo -n /usr/sbin/sesutil locate -u /dev/ses0 7 on",
+                "sudo -n /usr/sbin/sesutil map",
+            ],
         )
 
     async def test_cross_controller_disks_stay_distinct_in_public_snapshot_and_smart(self):
@@ -18707,14 +18883,25 @@ Consumers:
                     first, second = ses_map.split("ses1:")
                     ses_map = "ses1:" + second + first
                 service = self.dual_path_service(ses_map, [{"name": "da0", "serial": "SANITIZED-DUAL-PATH"}])
-                slot = (await service.get_snapshot()).slots[0]
+                snapshot = await service.get_snapshot()
+                slot = snapshot.slots[0]
                 self.assertEqual(sorted(t["ses_device"] for t in slot.ssh_ses_targets), ["/dev/ses0", "/dev/ses1"])
                 self.assertEqual((slot.led_supported, slot.led_backend, slot.led_reason), (True, "ssh", None))
 
-                await service.set_slot_led(slot.slot, LedAction.identify, invalidate_snapshot=False)
+                await service.set_slot_led(
+                    slot.slot,
+                    LedAction.identify,
+                    selected_enclosure_id=snapshot.selected_enclosure_id,
+                    invalidate_snapshot=False,
+                )
 
-                service._run_ssh_command.assert_awaited_once_with(
-                    f"sudo -n /usr/sbin/sesutil locate -u {slot.ssh_ses_targets[0]['ses_device']} 7 on", None
+                self.assertEqual(
+                    self.led_sequence_commands(service),
+                    [
+                        "sudo -n /usr/sbin/sesutil map",
+                        f"sudo -n /usr/sbin/sesutil locate -u {slot.ssh_ses_targets[0]['ses_device']} 7 on",
+                        "sudo -n /usr/sbin/sesutil map",
+                    ],
                 )
 
     def test_bay_peers_require_the_bay_to_list_the_disks_own_path(self):
@@ -18733,6 +18920,708 @@ Consumers:
 
 
 class InventoryServiceLedTests(unittest.IsolatedAsyncioTestCase):
+    CORE_MAP_ON = """
+ses0:
+  Enclosure Name: ExampleCo DualPathShelf
+  Enclosure ID: 5000c50000000001
+  Element 7, Type: Array Device Slot
+    Status: Not Installed (0x05 0x00 0x02 0x00)
+    Description: Slot07
+    Extra status:
+      - LED=locate
+ses1:
+  Enclosure Name: ExampleCo DualPathShelf
+  Enclosure ID: 5000c50000000001
+  Element 7, Type: Array Device Slot
+    Status: Not Installed (0x05 0x00 0x00 0x00)
+    Description: Slot07
+""".strip()
+    CORE_MAP_OFF = CORE_MAP_ON.replace(" (0x05 0x00 0x02 0x00)", " (0x05 0x00 0x00 0x00)").replace(
+        "    Extra status:\n      - LED=locate\n", ""
+    )
+
+    def led_service(self, platform: str, slot: SlotView):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        system = SystemConfig(
+            id=f"{platform}-led-test",
+            truenas=TrueNASConfig(platform=platform),
+            ssh=SSHConfig(enabled=True, host="host.example.test"),
+        )
+        service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), directory.name)
+        service._cache["shelf-a"] = InventorySnapshot(
+            slots=[slot],
+            selected_system_id=system.id,
+            selected_system_platform=platform,
+            selected_enclosure_id="shelf-a",
+            refresh_interval_seconds=30,
+        )
+        return service
+
+    async def test_second_locate_replaces_the_refresh_it_cancels(self) -> None:
+        # A second press while the first press's refresh still runs cancels
+        # that refresh; a replacement must be scheduled, not skipped because
+        # the cancelled task has not finished unwinding yet.
+        service = self.led_service("core", SlotView(slot=0, slot_label="00", row_index=0, column_index=0))
+        invalidated_at_start: list[bool] = []
+        finished = 0
+
+        async def background_refresh(cache_key: str, *, default_selection: bool = False) -> None:
+            nonlocal finished
+            # A refresh that starts with its key still marked invalid fails
+            # as busy, so the replacement must start after cleanup.
+            invalidated_at_start.append(cache_key in service._snapshot_invalidated)
+            if len(invalidated_at_start) == 1:
+                await asyncio.sleep(3600)
+            finished += 1
+
+        service._background_snapshot_refresh = background_refresh
+
+        service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+        first = service._snapshot_refresh_tasks["shelf-a"]
+        await asyncio.sleep(0)
+        self.assertEqual(len(invalidated_at_start), 1)
+
+        service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(first, timeout=0.5)
+        await asyncio.sleep(0)
+        second = service._snapshot_refresh_tasks.get("shelf-a")
+        self.assertIsNotNone(second, "the cancelled refresh was not replaced")
+        self.assertIsNot(second, first)
+        await asyncio.wait_for(second, timeout=0.5)
+        await asyncio.sleep(0)
+
+        self.assertEqual(invalidated_at_start, [False, False])
+        self.assertEqual(finished, 1)
+        self.assertNotIn("shelf-a", service._snapshot_refresh_tasks)
+        self.assertNotIn("shelf-a", service._snapshot_invalidated)
+
+    async def test_second_locate_replaces_a_refresh_it_could_not_cancel(self) -> None:
+        # The first press's refresh is already rebuilding (it holds snapshot
+        # activity), so the second press's invalidation cannot cancel it. That
+        # refresh then ends without publishing; a replacement must still run.
+        service = self.led_service("core", SlotView(slot=0, slot_label="00", row_index=0, column_index=0))
+        invalidated_at_start: list[bool] = []
+        release_first = asyncio.Event()
+
+        async def background_refresh(cache_key: str, *, default_selection: bool = False) -> None:
+            invalidated_at_start.append(cache_key in service._snapshot_invalidated)
+            if len(invalidated_at_start) == 1:
+                service._begin_snapshot_activity(cache_key)
+                try:
+                    await release_first.wait()
+                finally:
+                    service._finish_snapshot_activity(cache_key)
+
+        service._background_snapshot_refresh = background_refresh
+
+        service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+        first = service._snapshot_refresh_tasks["shelf-a"]
+        await asyncio.sleep(0)
+        for _ in range(3):
+            service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+        self.assertFalse(first.cancelling(), "this refresh is mid-rebuild and is not cancelled")
+        release_first.set()
+        await asyncio.wait_for(first, timeout=0.5)
+        for _ in range(50):
+            if len(invalidated_at_start) >= 2 and not service._snapshot_refresh_tasks:
+                break
+            await asyncio.sleep(0)
+
+        # One replacement for the whole burst, started after cleanup.
+        self.assertEqual(invalidated_at_start, [False, False], "the superseded refresh was not replaced")
+        self.assertNotIn("shelf-a", service._snapshot_refresh_tasks)
+        self.assertNotIn("shelf-a", service._snapshot_invalidated)
+
+    async def test_second_locate_refresh_retries_a_source_read_from_before_it(self) -> None:
+        # The first press's source read started before the second press
+        # invalidated the sources, so it can only end as stale. The second
+        # press's refresh joins it, then retries once with a read that
+        # starts after the press.
+        service = self.led_service("core", SlotView(slot=0, slot_label="00", row_index=0, column_index=0))
+        bundles: list[InventorySourceBundle] = []
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def collect() -> InventorySourceBundle:
+            bundle = InventorySourceBundle(
+                raw_data=TrueNASRawData(enclosures=[], disks=[], pools=[], disk_temperatures={}, smart_test_results=[]),
+                ssh_outputs={},
+                ssh_collected=False,
+                warnings=[],
+                sources={},
+                scale_ses_data=ParsedSSHData(),
+                quantastor_ses_data=ParsedSSHData(),
+            )
+            bundles.append(bundle)
+            if len(bundles) == 1:
+                first_started.set()
+                await release_first.wait()
+            return bundle
+
+        service._collect_inventory_source_bundle = AsyncMock(side_effect=collect)
+        service._get_snapshot_result = AsyncMock()
+
+        with patch.object(inventory_module.logger, "exception"):
+            service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+            await asyncio.wait_for(first_started.wait(), timeout=0.5)
+            service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+            for _ in range(5):
+                await asyncio.sleep(0)
+            release_first.set()
+            for _ in range(100):
+                if not service._snapshot_refresh_tasks and service._source_bundle_refresh_task is None:
+                    break
+                await asyncio.sleep(0.005)
+
+        self.assertEqual(len(bundles), 2, "the replacement refresh did not read the sources again")
+        service._get_snapshot_result.assert_awaited_once()
+        self.assertEqual(
+            service._get_snapshot_result.await_args.kwargs["minimum_source_publication"],
+            bundles[1].publication,
+        )
+
+    @staticmethod
+    def scripted_session(outputs: dict[str, str]) -> Mock:
+        """A locate SSH session that answers each command from the first matching marker."""
+        session = Mock()
+
+        def run(command: str, **_kwargs) -> SSHCommandResult:
+            stdout = next((output for marker, output in outputs.items() if marker in command), "")
+            return SSHCommandResult(command=command, ok=True, stdout=stdout, exit_code=0)
+
+        session.run_command_owned = AsyncMock(side_effect=run)
+        session.close_owned = AsyncMock()
+        return session
+
+    def ssh_led_service(self, platform: str, slot: SlotView, session: Mock):
+        service = self.led_service(platform, slot)
+        probe = SSHProbe(service.system.ssh)
+        service.ssh_probe = probe
+        self.enterContext(patch.object(probe, "open_session", return_value=session))
+        service.schedule_led_snapshot_refresh = Mock()
+        return service
+
+    SG_AES_SHELF_A = (
+        "  ExampleCo SgShelf 0001\n"
+        "  Primary enclosure logical identifier (hex): synthetic-shelf-a\n"
+        "Additional element status diagnostic page:\n"
+    )
+    SG_EC_ON = (
+        "  ExampleCo SgShelf 0001\n"
+        "Enclosure status diagnostic page:\n"
+        "  Element type: Array device slot, subenclosure id: 0 [ti=0]\n"
+        "    Element 0 descriptor:\n"
+        "      Predicted failure=0, Disabled=0, Swap=0, status: OK\n"
+        "      Ident=1\n"
+    )
+
+    def sg_slot(self, **target) -> SlotView:
+        return SlotView(
+            slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id="shelf-a",
+            led_supported=True, led_backend="scale_sg_ses",
+            ssh_ses_targets=[{"ses_device": "/dev/sg27", "ses_element_id": 0, "ses_slot_number": 0, **target}],
+        )
+
+    async def test_core_locate_refuses_a_device_that_now_reports_another_shelf(self) -> None:
+        # A /dev/sesN can be reassigned to a different shelf after a reconnect
+        # or replacement. The locate session reads the map first and stops
+        # before the locate command if the device names another shelf.
+        slot = SlotView(
+            slot=7, slot_label="07", row_index=0, column_index=0, enclosure_id="shelf-a",
+            led_supported=True, led_backend="ssh",
+            ssh_ses_targets=[{"ses_device": "/dev/ses0", "ses_element_id": 7, "enclosure_id": "5000c50000000001"}],
+        )
+        moved = self.CORE_MAP_OFF.replace("Enclosure ID: 5000c50000000001", "Enclosure ID: synthetic-replacement-shelf")
+        session = self.scripted_session({"sesutil map": moved})
+        service = self.ssh_led_service("core", slot, session)
+        self.assertIsNotNone(service._resolve_led_slot(7, "shelf-a"))
+
+        with self.assertRaises(inventory_module.LedTargetMovedError) as refused:
+            await service.set_slot_led(7, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        self.assertIsInstance(refused.exception, TrueNASAPIError)
+        self.assertIn("Refresh", str(refused.exception))
+        self.assertNotIn("synthetic-replacement-shelf", str(refused.exception))
+        self.assertEqual(
+            [call.args[0] for call in session.run_command_owned.await_args_list],
+            ["sudo -n /usr/sbin/sesutil map"],
+        )
+        session.close_owned.assert_awaited_once_with()
+        self.assertNotIn(("shelf-a", 7), service._led_slot_targets)
+        service.schedule_led_snapshot_refresh.assert_called_once_with(enclosure_id="shelf-a")
+
+    async def test_core_locate_checks_the_shelf_then_acts_in_the_same_session(self) -> None:
+        slot = SlotView(
+            slot=7, slot_label="07", row_index=0, column_index=0, enclosure_id="shelf-a",
+            led_supported=True, led_backend="ssh",
+            ssh_ses_targets=[
+                {"ses_device": "/dev/ses0", "ses_element_id": 7, "enclosure_id": "5000c50000000001"},
+                {"ses_device": "/dev/ses1", "ses_element_id": 7, "enclosure_id": "5000c50000000001"},
+            ],
+        )
+        # The second path now answers for another shelf: its readback cannot
+        # count, so the result is not confirmed even though ses0 reads on.
+        readback = self.CORE_MAP_ON.replace(
+            "ses1:\n  Enclosure Name: ExampleCo DualPathShelf\n  Enclosure ID: 5000c50000000001",
+            "ses1:\n  Enclosure Name: ExampleCo DualPathShelf\n  Enclosure ID: synthetic-replacement-shelf",
+        )
+        maps = iter([self.CORE_MAP_OFF, readback])
+        session = self.scripted_session({})
+        session.run_command_owned.side_effect = lambda command, **_kwargs: SSHCommandResult(
+            command=command, ok=True, exit_code=0,
+            stdout=next(maps) if command.endswith("sesutil map") else "",
+        )
+        service = self.ssh_led_service("core", slot, session)
+
+        result = await service.set_slot_led(7, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        self.assertEqual(
+            [call.args[0] for call in session.run_command_owned.await_args_list],
+            [
+                "sudo -n /usr/sbin/sesutil map",
+                "sudo -n /usr/sbin/sesutil locate -u /dev/ses0 7 on",
+                "sudo -n /usr/sbin/sesutil map",
+            ],
+        )
+        self.assertTrue(result["identify_active"])
+        self.assertFalse(result["confirmed"])
+        self.assertEqual([path["identify_active"] for path in result["paths"]], [True, None])
+
+    async def test_sg_ses_locate_refuses_a_device_that_now_reports_another_shelf(self) -> None:
+        session = self.scripted_session({
+            "-p aes /dev/sg27": self.SG_AES_SHELF_A.replace("synthetic-shelf-a", "synthetic-shelf-b"),
+        })
+        service = self.ssh_led_service("scale", self.sg_slot(enclosure_id="synthetic-shelf-a"), session)
+
+        with self.assertRaises(inventory_module.LedTargetMovedError):
+            await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        self.assertEqual(
+            [call.args[0] for call in session.run_command_owned.await_args_list],
+            ["sudo -n /usr/bin/sg_ses -p aes /dev/sg27"],
+        )
+
+    async def test_sg_ses_locate_checks_the_shelf_then_acts_in_the_same_session(self) -> None:
+        session = self.scripted_session({"-p aes /dev/sg27": self.SG_AES_SHELF_A, "-p ec /dev/sg27": self.SG_EC_ON})
+        service = self.ssh_led_service("scale", self.sg_slot(enclosure_id="synthetic-shelf-a"), session)
+
+        result = await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        self.assertEqual(
+            [call.args[0] for call in session.run_command_owned.await_args_list],
+            [
+                "sudo -n /usr/bin/sg_ses -p aes /dev/sg27",
+                "sudo -n /usr/bin/sg_ses --dev-slot-num=0 --set=ident /dev/sg27",
+                "sudo -n /usr/bin/sg_ses -p ec /dev/sg27",
+            ],
+        )
+        self.assertTrue(result["confirmed"])
+        session.close_owned.assert_awaited_once_with()
+
+    async def test_sg_ses_locate_refuses_when_the_shelf_check_cannot_be_read(self) -> None:
+        session = self.scripted_session({})
+        session.run_command_owned.side_effect = lambda command, **_kwargs: SSHCommandResult(
+            command=command, ok=False, stderr="synthetic failure", exit_code=1,
+        )
+        service = self.ssh_led_service("scale", self.sg_slot(enclosure_id="synthetic-shelf-a"), session)
+
+        with self.assertRaises(TrueNASAPIError) as refused:
+            await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        self.assertNotIsInstance(refused.exception, inventory_module.LedTargetMovedError)
+        self.assertEqual(session.run_command_owned.await_count, 1)
+
+    async def test_sg_ses_second_host_path_refused_after_the_first_was_switched_says_so(self) -> None:
+        slot = self.sg_slot(enclosure_id="synthetic-shelf-a")
+        slot.ssh_ses_targets = [
+            {**slot.ssh_ses_targets[0], "ssh_host": "node-a.example.test"},
+            {**slot.ssh_ses_targets[0], "ssh_host": "node-b.example.test", "ses_device": "/dev/sg9"},
+        ]
+        slot.led_backend = "quantastor_sg_ses"
+        service = self.led_service("quantastor", slot)
+        fake = fake_led_sequence(lambda host, command: (
+            sg_aes_header("synthetic-shelf-a" if host == "node-a.example.test" else "synthetic-shelf-b")
+            if " -p aes " in command else ""
+        ))
+        service._run_led_ssh_sequence = AsyncMock(side_effect=fake)
+        service.schedule_led_snapshot_refresh = Mock()
+
+        with self.assertRaises(inventory_module.LedTargetMovedError) as refused:
+            await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        self.assertIn("switched through one enclosure path", str(refused.exception))
+        self.assertIn(("node-a.example.test", "sudo -n /usr/bin/sg_ses --dev-slot-num=0 --set=ident /dev/sg27"), fake.sent)
+        self.assertFalse(any("--set=ident" in command for host, command in fake.sent if host == "node-b.example.test"))
+        service.schedule_led_snapshot_refresh.assert_called_once_with(enclosure_id="shelf-a")
+
+    async def test_identity_addressed_locate_backends_keep_the_fast_path(self) -> None:
+        # The TrueNAS API addresses the bay by enclosure ID and slot, and a
+        # UniFi NVR's bays are fixed in its one chassis, so a remembered
+        # target cannot reach another drive and no snapshot reread is needed.
+        for backend, raw_status in (("api", {}), ("unifi_fault", {"vendor_slot_number": 1})):
+            with self.subTest(backend=backend):
+                slot = SlotView(
+                    slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id="shelf-a",
+                    led_supported=True, led_backend=backend, raw_status=raw_status,
+                )
+                service = self.led_service("scale" if backend == "api" else "linux", slot)
+                service.get_snapshot = AsyncMock(side_effect=AssertionError("no snapshot reread"))
+                service.truenas_client.set_slot_status = AsyncMock()
+                service._set_unifi_slot_led_over_ssh = AsyncMock(return_value={"confirmed": True})
+
+                await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+                service.get_snapshot.assert_not_awaited()
+
+    async def test_api_locate_with_an_unchecked_ssh_fallback_rereads_the_snapshot_first(self) -> None:
+        slot = SlotView(
+            slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id="shelf-a",
+            led_supported=True, led_backend="api", ssh_ses_device="/dev/ses0", ssh_ses_element_id=7,
+        )
+        service = self.led_service("core", slot)
+        service.get_snapshot = AsyncMock(return_value=InventorySnapshot(
+            slots=[slot], refresh_interval_seconds=30, selected_enclosure_id="shelf-a",
+        ))
+        service.truenas_client.set_slot_status = AsyncMock()
+
+        await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        service.get_snapshot.assert_awaited_once_with(selected_enclosure_id="shelf-a")
+
+    async def test_sg_ses_moved_second_host_after_a_failed_first_host_does_not_claim_a_switch(self) -> None:
+        slot = self.sg_slot(enclosure_id="synthetic-shelf-a")
+        slot.ssh_ses_targets = [
+            {**slot.ssh_ses_targets[0], "ssh_host": "node-a.example.test"},
+            {**slot.ssh_ses_targets[0], "ssh_host": "node-b.example.test", "ses_device": "/dev/sg9"},
+        ]
+        slot.led_backend = "quantastor_sg_ses"
+        service = self.led_service("quantastor", slot)
+        sent: list[tuple[str, str]] = []
+
+        async def run(host, commands, *, then=None):
+            # node-a passes its shelf check but its locate command fails;
+            # node-b now reports another shelf.
+            results = []
+            pending = list(commands)
+            while pending:
+                for command in pending:
+                    sent.append((host, command))
+                    if " -p aes " in command:
+                        shelf = "synthetic-shelf-a" if host == "node-a.example.test" else "synthetic-shelf-b"
+                        result = SSHCommandResult(command=command, ok=True, stdout=sg_aes_header(shelf), exit_code=0)
+                    elif "--set=ident" in command:
+                        result = SSHCommandResult(command=command, ok=False, stderr="synthetic failure", exit_code=1)
+                    else:
+                        result = SSHCommandResult(command=command, ok=True, exit_code=0)
+                    results.append((result, 0.01))
+                if then is None:
+                    break
+                pending, then = then([result for result, _duration in results]), None
+            return results
+
+        service._run_led_ssh_sequence = AsyncMock(side_effect=run)
+        service.schedule_led_snapshot_refresh = Mock()
+
+        with self.assertRaises(inventory_module.LedTargetMovedError) as refused:
+            await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        message = str(refused.exception)
+        self.assertNotIn("was switched through", message)
+        self.assertIn("was not switched", message)
+        self.assertIn("synthetic failure", message)
+        self.assertFalse(any("--set=ident" in command for host, command in sent if host == "node-b.example.test"))
+
+    async def test_locate_without_a_recorded_shelf_rereads_the_snapshot_first(self) -> None:
+        # A shelf whose SES pages report no enclosure ID cannot be checked in
+        # the session, so a remembered target is not trusted: the press reads
+        # the current snapshot first, as before #926.
+        for platform, slot in (
+            ("scale", self.sg_slot()),
+            ("core", SlotView(
+                slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id="shelf-a",
+                led_supported=True, led_backend="ssh",
+                ssh_ses_targets=[{"ses_device": "/dev/ses0", "ses_element_id": 7}],
+            )),
+        ):
+            with self.subTest(platform=platform):
+                service = self.led_service(platform, slot)
+                current = slot.model_copy(update={"ssh_ses_targets": [
+                    {**slot.ssh_ses_targets[0], "ses_device": slot.ssh_ses_targets[0]["ses_device"][:-1] + "9"},
+                ]})
+                service.get_snapshot = AsyncMock(return_value=InventorySnapshot(
+                    slots=[current], refresh_interval_seconds=30, selected_enclosure_id="shelf-a",
+                ))
+                # The fresh device is still listed, with no shelf ID, as found.
+                fake = fake_led_sequence(
+                    lambda _host, command: "ses9:\n" if command.endswith("sesutil map") else ""
+                )
+                service._run_led_ssh_sequence = AsyncMock(side_effect=fake)
+
+                await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+                service.get_snapshot.assert_awaited_once_with(selected_enclosure_id="shelf-a")
+                sent = [command for _host, command in fake.sent]
+                self.assertTrue(any(command.endswith(("/dev/ses9 7 on", "/dev/sg29")) for command in sent), sent)
+                self.assertFalse(any("/dev/ses0" in command or "/dev/sg27" in command for command in sent), sent)
+
+    async def test_a_burst_of_locate_presses_keeps_one_source_task_at_a_time(self) -> None:
+        # Each press invalidates the sources while the first read is still
+        # collecting. Presses join the running source task instead of each
+        # queueing another behind the source lock, and the surviving refresh
+        # retries once after the stale read ends.
+        service = self.led_service("core", SlotView(slot=0, slot_label="00", row_index=0, column_index=0))
+        source_tasks = 0
+        background_source_refresh = service._background_source_bundle_refresh
+
+        def counted_source_refresh():
+            nonlocal source_tasks
+            source_tasks += 1
+            return background_source_refresh()
+
+        service._background_source_bundle_refresh = counted_source_refresh
+        reads = 0
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def collect() -> InventorySourceBundle:
+            nonlocal reads
+            reads += 1
+            bundle = InventorySourceBundle(
+                raw_data=TrueNASRawData(enclosures=[], disks=[], pools=[], disk_temperatures={}, smart_test_results=[]),
+                ssh_outputs={}, ssh_collected=False, warnings=[], sources={},
+                scale_ses_data=ParsedSSHData(), quantastor_ses_data=ParsedSSHData(),
+            )
+            if reads == 1:
+                first_started.set()
+                await release_first.wait()
+            return bundle
+
+        service._collect_inventory_source_bundle = AsyncMock(side_effect=collect)
+        service._get_snapshot_result = AsyncMock()
+        with patch.object(inventory_module.logger, "exception"):
+            service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+            await asyncio.wait_for(first_started.wait(), timeout=0.5)
+            for _ in range(5):
+                service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+                for _ in range(5):
+                    await asyncio.sleep(0)
+            release_first.set()
+            for _ in range(200):
+                if not service._snapshot_refresh_tasks and service._source_bundle_refresh_task is None:
+                    break
+                await asyncio.sleep(0.005)
+
+        self.assertEqual(reads, 2)
+        self.assertEqual(source_tasks, 2)
+        service._get_snapshot_result.assert_awaited_once()
+        self.assertFalse(service._snapshot_refresh_tasks)
+
+    async def test_led_sequence_uses_one_owned_session_without_the_inventory_lock(self) -> None:
+        service = self.led_service(
+            "core",
+            SlotView(slot=0, slot_label="00", row_index=0, column_index=0),
+        )
+        probe = SSHProbe(service.system.ssh)
+        service.ssh_probe = probe
+        service._ssh_session_lock_for_host = Mock(
+            side_effect=AssertionError("locate must not take the shared inventory SSH lock")
+        )
+        session = Mock()
+        session.run_command_owned = AsyncMock(
+            side_effect=[
+                SSHCommandResult(command="locate", ok=True, exit_code=0),
+                SSHCommandResult(command="map", ok=True, stdout=self.CORE_MAP_ON, exit_code=0),
+            ]
+        )
+        session.close_owned = AsyncMock()
+
+        with patch.object(probe, "open_session", return_value=session) as opened:
+            results = await service._run_led_ssh_sequence(None, ["locate", "map"])
+
+        opened.assert_called_once_with()
+        self.assertEqual([call.args[0] for call in session.run_command_owned.await_args_list], ["locate", "map"])
+        session.close_owned.assert_awaited_once_with()
+        service._ssh_session_lock_for_host.assert_not_called()
+        self.assertEqual([result.command for result, _duration in results], ["locate", "map"])
+
+    async def test_core_locate_uses_cached_target_one_short_sequence_and_reports_each_path(self) -> None:
+        slot = SlotView(
+            slot=7,
+            slot_label="07",
+            row_index=0,
+            column_index=0,
+            enclosure_id="shelf-a",
+            led_supported=True,
+            led_backend="ssh",
+            ssh_ses_device="/dev/ses0",
+            ssh_ses_element_id=7,
+            ssh_ses_targets=[
+                {"ses_device": "/dev/ses0", "ses_element_id": 7, "ses_slot_number": 7, "enclosure_id": "5000c50000000001"},
+                {"ses_device": "/dev/ses1", "ses_element_id": 7, "ses_slot_number": 7, "enclosure_id": "5000c50000000001"},
+            ],
+        )
+        service = self.led_service("core", slot)
+        service.get_snapshot = AsyncMock(side_effect=SnapshotStateBusyError())
+        locate_on = "sudo -n /usr/sbin/sesutil locate -u /dev/ses0 7 on"
+        locate_off = "sudo -n /usr/sbin/sesutil locate -u /dev/ses0 7 off"
+        readback = "sudo -n /usr/sbin/sesutil map"
+        # Shelf check (map), action, readback (map) in one session per press.
+        maps = iter([self.CORE_MAP_OFF, self.CORE_MAP_ON, self.CORE_MAP_ON, self.CORE_MAP_OFF])
+        fake = fake_led_sequence(lambda _host, command: next(maps) if command == readback else "")
+        service._run_led_ssh_sequence = AsyncMock(side_effect=fake)
+
+        with self.assertLogs(inventory_module.logger, level="INFO") as logged:
+            turned_on = await service.set_slot_led(7, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+        self.assertTrue(turned_on["confirmed"])
+        self.assertTrue(turned_on["identify_active"])
+        self.assertEqual(
+            turned_on["paths"],
+            [
+                {"ses_device": "/dev/ses0", "ses_element_id": 7, "identify_active": True},
+                {"ses_device": "/dev/ses1", "ses_element_id": 7, "identify_active": False},
+            ],
+        )
+        log_text = " ".join(logged.output)
+        for expected in ("core-led-test", "bay=07", "device=/dev/ses0", "element=7", "action=IDENTIFY", "exit_status=0", "duration_seconds="):
+            self.assertIn(expected, log_text)
+        service.get_snapshot.assert_not_awaited()
+        self.assertEqual([command for _host, command in fake.sent], [readback, locate_on, readback])
+
+        # The background refresh may have invalidated the snapshot-state cache;
+        # a follow-up light action still uses the retained, identity-checked target.
+        service._cache.clear()
+        turned_off = await service.set_slot_led(7, LedAction.clear, "shelf-a", invalidate_snapshot=False)
+        self.assertTrue(turned_off["confirmed"])
+        self.assertFalse(turned_off["identify_active"])
+        self.assertTrue(all(path["identify_active"] is False for path in turned_off["paths"]))
+        service.get_snapshot.assert_not_awaited()
+        self.assertEqual([command for _host, command in fake.sent[3:]], [readback, locate_off, readback])
+
+    async def test_core_locate_readback_mismatch_is_not_confirmed(self) -> None:
+        slot = SlotView(
+            slot=7, slot_label="07", row_index=0, column_index=0,
+            enclosure_id="shelf-a", led_supported=True, led_backend="ssh",
+            ssh_ses_targets=[
+                {"ses_device": "/dev/ses0", "ses_element_id": 7, "enclosure_id": "5000c50000000001"},
+                {"ses_device": "/dev/ses1", "ses_element_id": 7, "enclosure_id": "5000c50000000001"},
+            ],
+        )
+        service = self.led_service("core", slot)
+        readback = "sudo -n /usr/sbin/sesutil map"
+        fake = fake_led_sequence(lambda _host, command: self.CORE_MAP_OFF if command == readback else "")
+        service._run_led_ssh_sequence = AsyncMock(side_effect=fake)
+
+        result = await service.set_slot_led(7, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        self.assertFalse(result["confirmed"])
+        self.assertFalse(result["identify_active"])
+        self.assertEqual(sum("sesutil locate " in command for _host, command in fake.sent), 1)
+
+    async def test_locate_ssh_sessions_are_bounded_per_host_without_the_inventory_lock(self) -> None:
+        slot = SlotView(slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id="shelf-a")
+        service = self.led_service("core", slot)
+        release = asyncio.Event()
+        open_now = 0
+        peak = 0
+        opened: list[str] = []
+
+        class GatedSession:
+            def __init__(self, host: str) -> None:
+                self.host = host
+
+            async def run_command_owned(self, command: str, **_kwargs) -> SSHCommandResult:
+                await release.wait()
+                return SSHCommandResult(command=command, ok=True, exit_code=0)
+
+            async def close_owned(self) -> None:
+                nonlocal open_now
+                open_now -= 1
+
+        def probe_for(host: str) -> Mock:
+            probe = Mock(spec=SSHProbe)
+
+            def open_session() -> GatedSession:
+                nonlocal open_now, peak
+                open_now += 1
+                peak = max(peak, open_now)
+                opened.append(host)
+                return GatedSession(host)
+
+            probe.open_session.side_effect = open_session
+            return probe
+
+        probes = {"host.example.test": probe_for("host.example.test"), "other.example.test": probe_for("other.example.test")}
+        service._ssh_probe_for_host = lambda host: probes[host or "host.example.test"]
+        service._ssh_destination_authority_approved = lambda host=None: True
+        inventory_lock = service._ssh_session_lock_for_host()
+
+        with patch.object(inventory_module, "LED_SSH_ADMISSION_WAIT_SECONDS", 0.05):
+            running = [
+                asyncio.create_task(service._run_led_ssh_sequence(None, ["locate", "readback"]))
+                for _ in range(inventory_module.LED_SSH_SESSIONS_PER_HOST)
+            ]
+            await asyncio.sleep(0)
+            # Every slot for this host is taken: the next press waits briefly,
+            # then is refused without opening another login.
+            with self.assertRaises(inventory_module.LedSessionBusyError) as refused:
+                await service._run_led_ssh_sequence(None, ["locate", "readback"])
+            self.assertIsInstance(refused.exception, TrueNASAPIError)
+            self.assertIn("Try again", str(refused.exception))
+            self.assertEqual(opened.count("host.example.test"), inventory_module.LED_SSH_SESSIONS_PER_HOST)
+            # Another host is not held up by the first host's presses.
+            other = asyncio.create_task(service._run_led_ssh_sequence("other.example.test", ["locate"]))
+            await asyncio.sleep(0)
+            self.assertEqual(opened.count("other.example.test"), 1)
+            self.assertFalse(inventory_lock.locked())
+            release.set()
+            await asyncio.gather(*running, other)
+
+        self.assertEqual(peak, inventory_module.LED_SSH_SESSIONS_PER_HOST + 1)
+        self.assertEqual(open_now, 0)
+        # A freed slot admits the next press.
+        self.assertEqual(len(await service._run_led_ssh_sequence(None, ["locate"])), 1)
+
+    def test_partial_led_readback_reports_off_only_when_every_path_was_read(self) -> None:
+        # One path read "off" and the other could not be read: the light may
+        # still be on through the unread path, so the state is unknown.
+        def result(*states):
+            paths = [
+                {"ses_device": f"/dev/sg{index}", "ses_element_id": 7, "identify_active": state}
+                for index, state in enumerate(states)
+            ]
+            return InventoryService._led_readback_result(True, paths)
+
+        partial_off = result(False, None)
+        self.assertIsNone(partial_off["identify_active"])
+        self.assertFalse(partial_off["confirmed"])
+        partial_on = result(True, None)
+        self.assertTrue(partial_on["identify_active"])
+        self.assertFalse(partial_on["confirmed"])
+        all_off = InventoryService._led_readback_result(
+            False,
+            [{"identify_active": False}, {"identify_active": False}],
+        )
+        self.assertIs(all_off["identify_active"], False)
+        self.assertTrue(all_off["confirmed"])
+        self.assertIsNone(result(None, None)["identify_active"])
+        self.assertIs(result(True, True)["confirmed"], True)
+
+    async def test_api_led_backend_returns_an_explicit_unconfirmed_result(self) -> None:
+        slot = SlotView(
+            slot=0, slot_label="00", row_index=0, column_index=0,
+            enclosure_id="shelf-a", led_supported=True, led_backend="api",
+        )
+        service = self.led_service("scale", slot)
+        service.truenas_client.set_slot_status = AsyncMock()
+
+        result = await service.set_slot_led(0, LedAction.identify, "shelf-a", invalidate_snapshot=False)
+
+        self.assertIsNone(result["confirmed"])
+        self.assertIsNone(result["identify_active"])
+        self.assertFalse(result["readback_supported"])
+
     async def test_core_duplicate_slot_descriptions_disable_ssh_identify_capability(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             system = SystemConfig(
@@ -18800,8 +19689,12 @@ class InventoryServiceLedTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             system = SystemConfig(id="core-multipath", truenas=TrueNASConfig(platform="core"), ssh=SSHConfig(enabled=True))
             service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
+            both_paths_shelf_a = "ses0:\n  Enclosure ID: shelf-a\nses1:\n  Enclosure ID: shelf-a\n"
             service._run_ssh_command = AsyncMock(
-                return_value=SSHCommandResult(command="", ok=True, stdout="", exit_code=0)
+                side_effect=lambda command, _host=None: SSHCommandResult(
+                    command=command, ok=True, exit_code=0,
+                    stdout=both_paths_shelf_a if command.endswith("sesutil map") else "",
+                )
             )
             for name, (ses_targets, enclosures, allowed) in cases.items():
                 with self.subTest(name):
@@ -18826,8 +19719,13 @@ class InventoryServiceLedTests(unittest.IsolatedAsyncioTestCase):
                         service._run_ssh_command.assert_not_awaited()
                         continue
                     await service._set_slot_led_over_ssh(slot, LedAction.identify)
-                    service._run_ssh_command.assert_awaited_once_with(
-                        "sudo -n /usr/sbin/sesutil locate -u /dev/ses0 7 on", None
+                    self.assertEqual(
+                        [call.args for call in service._run_ssh_command.await_args_list],
+                        [
+                            ("sudo -n /usr/sbin/sesutil map", None),
+                            ("sudo -n /usr/sbin/sesutil locate -u /dev/ses0 7 on", None),
+                            ("sudo -n /usr/sbin/sesutil map", None),
+                        ],
                     )
 
     def test_core_ses_enclosure_map_is_built_once_per_snapshot_and_only_for_multipath_bays(self) -> None:
@@ -18941,8 +19839,13 @@ class InventoryServiceLedTests(unittest.IsolatedAsyncioTestCase):
             service = build_inventory_service(
                 Settings(), system, AsyncMock(), AsyncMock(), temp_dir
             )
+            # The device is still listed and, like the shelf it was found on,
+            # reports no enclosure ID.
             service._run_ssh_command = AsyncMock(
-                return_value=SSHCommandResult(command="", ok=True, stdout="", exit_code=0)
+                side_effect=lambda command, _host=None: SSHCommandResult(
+                    command=command, ok=True, exit_code=0,
+                    stdout="ses2:\n" if command.endswith("sesutil map") else "",
+                )
             )
             slot = SlotView(
                 slot=0,
@@ -18962,8 +19865,13 @@ class InventoryServiceLedTests(unittest.IsolatedAsyncioTestCase):
 
             await service._set_slot_led_over_ssh(slot, LedAction.identify)
 
-            service._run_ssh_command.assert_awaited_once_with(
-                "sudo -n /usr/sbin/sesutil locate -u /dev/ses2 2 on", None
+            self.assertEqual(
+                [call.args for call in service._run_ssh_command.await_args_list],
+                [
+                    ("sudo -n /usr/sbin/sesutil map", None),
+                    ("sudo -n /usr/sbin/sesutil locate -u /dev/ses2 2 on", None),
+                    ("sudo -n /usr/sbin/sesutil map", None),
+                ],
             )
 
     async def test_core_led_control_fails_closed_for_duplicate_slot_descriptions(self) -> None:
@@ -19291,10 +20199,25 @@ Enclosure Status diagnostic page:
         class DummySSHProbe:
             def __init__(self) -> None:
                 self.commands: list[str] = []
+                self.identify_active = False
 
             async def run_command(self, command: str) -> SSHCommandResult:
                 self.commands.append(command)
-                return SSHCommandResult(command=command, ok=True, stdout="", exit_code=0)
+                if "--set=ident" in command:
+                    self.identify_active = True
+                elif "--clear=ident" in command:
+                    self.identify_active = False
+                stdout = ""
+                if " -p ec " in command:
+                    stdout = (
+                        "ExampleCo ScaleShelf 0001\n"
+                        "Enclosure status diagnostic page:\n"
+                        "  Element type: Array device slot, subenclosure id: 0 [ti=0]\n"
+                        "    Element 0 descriptor:\n"
+                        "      Predicted failure=0, Disabled=0, Swap=0, status: OK\n"
+                        f"      Ident={int(self.identify_active)}\n"
+                    )
+                return SSHCommandResult(command=command, ok=True, stdout=stdout, exit_code=0)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings()
@@ -19326,9 +20249,13 @@ Enclosure Status diagnostic page:
                 ],
             )
 
-            await service._set_slot_led_over_ssh(slot, LedAction.identify)
-            await service._set_slot_led_over_ssh(slot, LedAction.clear)
+            turned_on = await service._set_slot_led_over_ssh(slot, LedAction.identify)
+            turned_off = await service._set_slot_led_over_ssh(slot, LedAction.clear)
 
+            self.assertTrue(turned_on["confirmed"])
+            self.assertTrue(turned_on["identify_active"])
+            self.assertTrue(turned_off["confirmed"])
+            self.assertFalse(turned_off["identify_active"])
             self.assertIn(
                 "sudo -n /usr/bin/sg_ses --dev-slot-num=0 --set=ident /dev/sg27",
                 service.ssh_probe.commands,
@@ -19360,9 +20287,10 @@ Enclosure Status diagnostic page:
                 DummySSHProbe(),
                 temp_dir,
             )
-            service._run_ssh_command = AsyncMock(
-                return_value=SSHCommandResult(command="", ok=True, stdout="", exit_code=0)
+            fake = fake_led_sequence(
+                lambda _host, command: sg_aes_header("synthetic-shelf") if " -p aes " in command else ""
             )
+            service._run_led_ssh_sequence = AsyncMock(side_effect=fake)
             slot = SlotView(
                 slot=0,
                 slot_label="00",
@@ -19376,6 +20304,7 @@ Enclosure Status diagnostic page:
                         "ses_device": "/dev/sg11",
                         "ses_element_id": 0,
                         "ses_slot_number": 0,
+                        "enclosure_id": "synthetic-shelf",
                     }
                 ],
             )
@@ -19383,13 +20312,14 @@ Enclosure Status diagnostic page:
             await service._set_slot_led_over_ssh(slot, LedAction.identify)
             await service._set_slot_led_over_ssh(slot, LedAction.clear)
 
-            awaited = [call.args for call in service._run_ssh_command.await_args_list]
+            awaited = list(fake.sent)
+            self.assertIn(("10.0.0.20", "sudo -n /usr/bin/sg_ses -p aes /dev/sg11"), awaited)
             self.assertIn(
-                ("sudo -n /usr/bin/sg_ses --dev-slot-num=0 --set=ident /dev/sg11", "10.0.0.20"),
+                ("10.0.0.20", "sudo -n /usr/bin/sg_ses --dev-slot-num=0 --set=ident /dev/sg11"),
                 awaited,
             )
             self.assertIn(
-                ("sudo -n /usr/bin/sg_ses --dev-slot-num=0 --clear=ident /dev/sg11", "10.0.0.20"),
+                ("10.0.0.20", "sudo -n /usr/bin/sg_ses --dev-slot-num=0 --clear=ident /dev/sg11"),
                 awaited,
             )
 
@@ -19424,16 +20354,24 @@ Enclosure Status diagnostic page:
                 },
             )
             snapshot = InventorySnapshot(slots=[slot], refresh_interval_seconds=30)
-            service.get_snapshot = AsyncMock(return_value=snapshot)
+            service._remember_led_snapshot(inventory_module.SNAPSHOT_NO_ENCLOSURE_KEY, snapshot)
+            # A controller rescan has since moved this bay's drive to physical
+            # index 5. BMC indices cannot be checked inside the press, so the
+            # press rereads the snapshot and uses the current coordinates.
+            current = slot.model_copy(update={"raw_status": {"bmc_controller_id": 0, "bmc_physical_index": 5}})
+            service.get_snapshot = AsyncMock(
+                return_value=InventorySnapshot(slots=[current], refresh_interval_seconds=30)
+            )
 
             await service.set_slot_led(0, LedAction.identify, invalidate_snapshot=False)
             await service.set_slot_led(0, LedAction.clear, invalidate_snapshot=False)
 
+            self.assertEqual(service.get_snapshot.await_count, 2)
             self.assertEqual(
                 bmc_service.set_drive_identify.call_args_list,
                 [
-                    unittest.mock.call(0, 4, True),
-                    unittest.mock.call(0, 4, False),
+                    unittest.mock.call(0, 5, True),
+                    unittest.mock.call(0, 5, False),
                 ],
             )
 

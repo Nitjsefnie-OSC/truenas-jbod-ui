@@ -2643,6 +2643,11 @@
     return `${systemId || "__system__"}::${enclosureId || "__auto__"}`;
   }
 
+  function snapshotUpdatedMs(snapshot) {
+    const parsed = Date.parse(snapshot?.last_updated || "");
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
   function snapshotHasTrustedTopology(snapshot) {
     if (!snapshot) {
       return false;
@@ -10669,6 +10674,18 @@
     }
     const mutation = captureMutationContext("sendLedAction");
     if (!mutation) return;
+    const originSnapshot = cloneJsonValue(state.snapshot);
+    const originLabel = [
+      originSnapshot?.selected_system_label || originSnapshot?.selected_system_id || mutation.systemId,
+      originSnapshot?.selected_enclosure_label || originSnapshot?.selected_enclosure_id,
+    ].filter(Boolean).join(" / ");
+    // Slot labels repeat across shelves. A result that lands after the
+    // operator moved to another system or enclosure names where it came from.
+    const reportLocate = (message, tone) => {
+      const stillCurrent = mutation.scope === currentUiScopeKey() && inventoryScopeMatchesSelection();
+      setStatus(stillCurrent || !originLabel ? message : `${originLabel}: ${message}`, tone);
+    };
+    let retainedSnapshot = null;
     let succeeded = false;
     try {
       setStatus(`${action === "IDENTIFY" ? "Turning on" : "Turning off"} the locate light for slot ${slot.slot_label}...`);
@@ -10678,17 +10695,76 @@
         body: JSON.stringify({ action }),
       });
       succeeded = true;
-      if (!mutationContextIsCurrent(mutation)) return;
-      applySnapshot(payload.snapshot);
-      renderAll();
-      scheduleSmartPrefetch();
-      setStatus(`Locate light ${action === "IDENTIFY" ? "on" : "off"} for slot ${slot.slot_label}, sent through ${locateLightSourceLabel(slot)}.`);
+      const patchResult = (snapshot) => {
+        if (!snapshot || !Array.isArray(snapshot.slots) || typeof payload.identify_active !== "boolean") {
+          return snapshot;
+        }
+        const matchingSlot = snapshot.slots.find((item) => Number(item.slot) === Number(payload.slot));
+        if (matchingSlot) matchingSlot.identify_active = payload.identify_active;
+        return snapshot;
+      };
+      const currentSnapshotMatchesOrigin = mutation.scope === currentUiScopeKey()
+        && inventoryScopeMatchesSelection();
+      if (currentSnapshotMatchesOrigin) {
+        patchResult(state.snapshot);
+        retainedSnapshot = cloneJsonValue(state.snapshot);
+        renderAll();
+      } else {
+        // The operator may have loaded newer inventory for this shelf while
+        // the reply was slow. Patch only the LED state into the newest copy
+        // we hold; never put the older origin snapshot back over it.
+        const cacheKey = snapshotReuseCacheKey(mutation.systemId, originSnapshot?.selected_enclosure_id || null);
+        const cached = state.snapshotReuseCache?.[cacheKey];
+        const newest = cached && snapshotUpdatedMs(cached) >= snapshotUpdatedMs(originSnapshot)
+          ? cloneJsonValue(cached)
+          : originSnapshot;
+        retainedSnapshot = patchResult(newest);
+      }
+
+      const requestedState = payload.requested_active === false ? "off" : "on";
+      if (payload.confirmed === true) {
+        reportLocate(`Locate light ${requestedState} for slot ${slot.slot_label}, confirmed through ${locateLightSourceLabel(slot)}.`);
+      } else if (payload.confirmed === false) {
+        reportLocate(`The enclosure did not confirm the locate light is ${requestedState} for slot ${slot.slot_label}.`, "warning");
+      } else {
+        reportLocate(`The locate light request was sent for slot ${slot.slot_label}, but this system cannot confirm it immediately.`, "warning");
+      }
     } catch (error) {
-      if (!mutationContextIsCurrent(mutation)) return;
       handleWriteRejection(error);
-      setStatus(`Could not change the locate light: ${error.message || error}`, "error");
+      reportLocate(`Could not change the locate light for slot ${slot.slot_label}: ${error.message || error}`, "error");
     } finally {
+      const retainedKey = retainedSnapshot
+        ? snapshotReuseCacheKey(mutation.systemId, retainedSnapshot.selected_enclosure_id || null)
+        : null;
+      // finishMutationContext() clears this system's reuse cache, so read the
+      // entries first and re-store only if the retained copy is not older.
+      // The system selector reopens the automatic entry (system::__auto__),
+      // so restore it too when it held this same shelf.
+      const autoKey = retainedSnapshot ? snapshotReuseCacheKey(mutation.systemId, null) : null;
+      const cachedBeforeFinish = retainedKey ? state.snapshotReuseCache?.[retainedKey] : null;
+      const autoBeforeFinish = autoKey && autoKey !== retainedKey ? state.snapshotReuseCache?.[autoKey] : null;
       finishMutationContext(mutation, succeeded);
+      if (retainedSnapshot) {
+        state.snapshotReuseCache ||= {};
+        const retainedStored = !(cachedBeforeFinish
+          && snapshotUpdatedMs(cachedBeforeFinish) > snapshotUpdatedMs(retainedSnapshot));
+        if (retainedStored) state.snapshotReuseCache[retainedKey] = retainedSnapshot;
+        const originScope = retainedSnapshot.selected_enclosure_id || null;
+        const autoScope = autoBeforeFinish ? autoBeforeFinish.selected_enclosure_id || null : null;
+        const scopeParts = (scope) => new Set(String(scope || "").split("+").filter(Boolean));
+        const autoParts = scopeParts(autoScope);
+        if (autoBeforeFinish && autoScope === originScope) {
+          if (retainedStored && snapshotUpdatedMs(autoBeforeFinish) <= snapshotUpdatedMs(retainedSnapshot)) {
+            state.snapshotReuseCache[autoKey] = cloneJsonValue(retainedSnapshot);
+          }
+        } else if (autoBeforeFinish && ![...scopeParts(originScope)].some((part) => autoParts.has(part))) {
+          // The automatic entry now points at another shelf of this system,
+          // which this locate did not change: keep it so the system selector
+          // can still reopen it. A combined view that includes this shelf may
+          // show the old light state, so it is dropped and refreshed instead.
+          state.snapshotReuseCache[autoKey] = autoBeforeFinish;
+        }
+      }
     }
   }
 

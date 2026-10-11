@@ -598,7 +598,14 @@ class BootstrapSudoGrantContractTests(unittest.IsolatedAsyncioTestCase):
 
         async def record_one(command, host=None, **_kwargs):
             recorded.append(command)
-            return SSHCommandResult(command=command, ok=True, stdout="", stderr="", exit_code=0)
+            # The locate shelf check reads the enclosure device first; it still
+            # reports the synthetic shelf, so the locate commands run too.
+            stdout = ""
+            if command.endswith("/usr/sbin/sesutil map"):
+                stdout = "ses3:\n  Enclosure ID: synthetic-shelf\n"
+            elif "/usr/bin/sg_ses -p aes " in command:
+                stdout = "  Primary enclosure logical identifier (hex): synthetic-shelf\n"
+            return SSHCommandResult(command=command, ok=True, stdout=stdout, stderr="", exit_code=0)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             service = self.build_service(temp_dir, platform)
@@ -666,6 +673,7 @@ class BootstrapSudoGrantContractTests(unittest.IsolatedAsyncioTestCase):
                         "ses_element_id": 3,
                         "ses_slot_number": 3,
                         "ssh_host": host,
+                        "enclosure_id": "synthetic-shelf",
                     }
                 ],
                 ssh_ses_device=ses_device,

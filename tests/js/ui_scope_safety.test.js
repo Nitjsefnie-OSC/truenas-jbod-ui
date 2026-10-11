@@ -28,7 +28,7 @@ test("explicit enclosure cache miss never borrows or relabels another shelf", ()
   assert.equal(applied.slots[0].serial, "SYNTHETIC-A");
 });
 
-for (const action of ["sendLedAction", "saveMapping", "clearMapping", "importMappingsFromFile"]) {
+for (const action of ["saveMapping", "clearMapping", "importMappingsFromFile"]) {
   for (const transition of ["system", "enclosure", "refresh-epoch", "slot", "draft", "same"]) {
     test(`${action} completion respects ${transition}`, async () => {
       const pending = deferred();
@@ -56,6 +56,330 @@ for (const action of ["sendLedAction", "saveMapping", "clearMapping", "importMap
   }
 }
 
+test("locate completion keeps and patches the originating result after a scope change", async () => {
+  const pending = deferred();
+  const statuses = [];
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+  const state = {
+    snapshotMode:false,
+    snapshot:{selected_system_id:"a", selected_enclosure_id:"one", slots:[originSlot]},
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(message, tone){ statuses.push([message, tone || "info"]); },
+    sendScopedRequest:async()=>pending.promise,
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", ...guardNames, "sendLedAction"], context);
+  const run = c.sendLedAction("IDENTIFY");
+  await new Promise(resolve=>setImmediate(resolve));
+  state.selectedSystemId = "b";
+  state.selectedEnclosureId = "two";
+  state.selectedSlot = 1;
+  state.snapshot = {
+    selected_system_id:"b", selected_enclosure_id:"two",
+    slots:[{slot:1, slot_label:"01", identify_active:false}],
+  };
+  pending.resolve({
+    ok:true, system_id:"a", enclosure_id:"one", slot:0, slot_label:"00",
+    requested_active:true, identify_active:true, confirmed:true, readback_supported:true,
+    paths:[{ses_device:"/dev/ses0", ses_element_id:7, identify_active:true}],
+  });
+  await run;
+
+  assert.equal(state.snapshot.slots[0].identify_active, false, "the newly selected scope is untouched");
+  assert.equal(state.snapshotReuseCache["a::one"].slots[0].identify_active, true);
+  // Slot labels repeat across shelves, so a late result names where it came from.
+  assert.match(statuses.at(-1)[0], /^a \/ one: Locate light on for slot 00/);
+  assert.equal(state.mutationResults[JSON.stringify([JSON.stringify(["a", "one"]), "sendLedAction"])].succeeded, true);
+});
+
+for (const outcome of ["confirmed", "unconfirmed", "failed"]) {
+  test(`a late ${outcome} locate result names its origin shelf after a scope change`, async () => {
+    const pending = deferred();
+    const statuses = [];
+    const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+    const state = {
+      snapshotMode:false,
+      snapshot:{
+        selected_system_id:"a", selected_system_label:"Synthetic System A",
+        selected_enclosure_id:"one", selected_enclosure_label:"Shelf One", slots:[originSlot],
+      },
+      selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+      latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+      snapshotReuseCache:{}, mutationsInFlight:{}, mutationResults:{},
+    };
+    const context = {
+      state, URLSearchParams,
+      writeBlockedByPolicy:()=>false,
+      getSlotById:()=>originSlot,
+      setStatus(message, tone){ statuses.push([message, tone || "info"]); },
+      sendScopedRequest:async()=>pending.promise,
+      applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+      handleWriteRejection(){},
+    };
+    const c = load(["cloneJsonValue", "snapshotReuseCacheKey", ...guardNames, "sendLedAction"], context);
+    const run = c.sendLedAction("IDENTIFY");
+    await new Promise(resolve=>setImmediate(resolve));
+    state.selectedEnclosureId = "two";
+    state.snapshot = {selected_system_id:"a", selected_enclosure_id:"two", slots:[{slot:0, slot_label:"00"}]};
+    if (outcome === "failed") pending.reject(new Error("synthetic failure"));
+    else pending.resolve({
+      ok:true, system_id:"a", enclosure_id:"one", slot:0, slot_label:"00", requested_active:true,
+      identify_active:outcome === "confirmed" ? true : null, confirmed:outcome === "confirmed" ? true : null,
+    });
+    await run;
+
+    const [message] = statuses.at(-1);
+    assert.match(message, /^Synthetic System A \/ Shelf One: /);
+    assert.match(message, /slot 00/);
+  });
+}
+
+test("a late locate reply never puts an older shelf snapshot over a newer cached one", async () => {
+  const pending = deferred();
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false, serial:"SANITIZED-OLD"};
+  const state = {
+    snapshotMode:false,
+    snapshot:{selected_system_id:"a", selected_enclosure_id:"one", last_updated:"2026-01-01T00:00:00Z", slots:[originSlot]},
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(){}, sendScopedRequest:async()=>pending.promise,
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", "snapshotUpdatedMs", ...guardNames, "sendLedAction"], context);
+  const run = c.sendLedAction("IDENTIFY");
+  await new Promise(resolve=>setImmediate(resolve));
+  // The operator leaves, comes back long enough to load newer inventory for
+  // this shelf, and leaves again before the slow reply arrives.
+  state.snapshotReuseCache["a::one"] = {
+    selected_system_id:"a", selected_enclosure_id:"one", last_updated:"2026-01-01T00:05:00Z",
+    slots:[{slot:0, slot_label:"00", identify_active:false, serial:"SANITIZED-NEW"}],
+  };
+  state.selectedEnclosureId = "two";
+  state.snapshot = {selected_system_id:"a", selected_enclosure_id:"two", slots:[]};
+  pending.resolve({ok:true, slot:0, requested_active:true, identify_active:true, confirmed:true});
+  await run;
+
+  const kept = state.snapshotReuseCache["a::one"];
+  assert.equal(kept.slots[0].serial, "SANITIZED-NEW");
+  assert.equal(kept.slots[0].identify_active, true, "only the LED state is merged in");
+  assert.equal(kept.last_updated, "2026-01-01T00:05:00Z");
+});
+
+test("a late locate reply also restores the system's automatic reuse entry", async () => {
+  const pending = deferred();
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+  const origin = {selected_system_id:"a", selected_enclosure_id:"one", last_updated:"2026-01-01T00:00:00Z", slots:[originSlot]};
+  const state = {
+    snapshotMode:false, snapshot:origin,
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    // What rememberReusableSnapshot() stores for the shelf the operator is on.
+    snapshotReuseCache:{"a::one":structuredClone(origin), "a::__auto__":structuredClone(origin)},
+    mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(){}, sendScopedRequest:async()=>pending.promise,
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", "snapshotUpdatedMs", ...guardNames, "sendLedAction"], context);
+  const run = c.sendLedAction("IDENTIFY");
+  await new Promise(resolve=>setImmediate(resolve));
+  state.selectedSystemId = "b";
+  state.selectedEnclosureId = "two";
+  state.snapshot = {selected_system_id:"b", selected_enclosure_id:"two", slots:[]};
+  pending.resolve({ok:true, slot:0, requested_active:true, identify_active:true, confirmed:true});
+  await run;
+
+  // Switching back through the system selector looks up the automatic key.
+  const auto = state.snapshotReuseCache["a::__auto__"];
+  assert.ok(auto, "the automatic entry for the origin system was dropped");
+  assert.equal(auto.selected_enclosure_id, "one");
+  assert.equal(auto.slots[0].identify_active, true);
+  assert.equal(state.snapshotReuseCache["a::one"].slots[0].identify_active, true);
+});
+
+test("a late locate reply leaves another shelf's automatic entry alone", async () => {
+  const pending = deferred();
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+  const origin = {selected_system_id:"a", selected_enclosure_id:"one", last_updated:"2026-01-01T00:00:00Z", slots:[originSlot]};
+  const other = {selected_system_id:"a", selected_enclosure_id:"three", last_updated:"2026-01-01T00:05:00Z", slots:[]};
+  const state = {
+    snapshotMode:false, snapshot:origin,
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{"a::one":structuredClone(origin)}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(){}, sendScopedRequest:async()=>pending.promise,
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", "snapshotUpdatedMs", ...guardNames, "sendLedAction"], context);
+  const run = c.sendLedAction("IDENTIFY");
+  await new Promise(resolve=>setImmediate(resolve));
+  // The operator moved to another shelf of the same system, then away.
+  state.snapshotReuseCache["a::three"] = structuredClone(other);
+  state.snapshotReuseCache["a::__auto__"] = structuredClone(other);
+  state.selectedSystemId = "b";
+  state.snapshot = {selected_system_id:"b", selected_enclosure_id:"two", slots:[]};
+  pending.resolve({ok:true, slot:0, requested_active:true, identify_active:true, confirmed:true});
+  await run;
+
+  // The automatic entry for the other shelf survives unchanged, so the
+  // system selector can still reopen it.
+  assert.deepEqual(state.snapshotReuseCache["a::__auto__"], other);
+});
+
+test("a late locate reply drops an automatic combined view that includes the shelf", async () => {
+  const pending = deferred();
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+  const origin = {selected_system_id:"a", selected_enclosure_id:"one", last_updated:"2026-01-01T00:00:00Z", slots:[originSlot]};
+  const combined = {selected_system_id:"a", selected_enclosure_id:"one+two", last_updated:"2026-01-01T00:05:00Z", slots:[]};
+  const state = {
+    snapshotMode:false, snapshot:origin,
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{"a::one":structuredClone(origin)}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(){}, sendScopedRequest:async()=>pending.promise,
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", "snapshotUpdatedMs", ...guardNames, "sendLedAction"], context);
+  const run = c.sendLedAction("IDENTIFY");
+  await new Promise(resolve=>setImmediate(resolve));
+  state.snapshotReuseCache["a::__auto__"] = structuredClone(combined);
+  state.selectedSystemId = "b";
+  state.snapshot = {selected_system_id:"b", selected_enclosure_id:"two", slots:[]};
+  pending.resolve({ok:true, slot:0, requested_active:true, identify_active:true, confirmed:true});
+  await run;
+
+  assert.equal(state.snapshotReuseCache["a::__auto__"], undefined);
+  assert.equal(state.snapshotReuseCache["a::one"].slots[0].identify_active, true);
+});
+
+test("a locate result in the same scope keeps its plain message", async () => {
+  const statuses = [];
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+  const state = {
+    snapshotMode:false,
+    snapshot:{selected_system_id:"a", selected_system_label:"Synthetic System A", selected_enclosure_id:"one", slots:[originSlot]},
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(message, tone){ statuses.push([message, tone || "info"]); },
+    sendScopedRequest:async()=>({ok:true, slot:0, requested_active:true, identify_active:true, confirmed:true}),
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", ...guardNames, "sendLedAction"], context);
+  await c.sendLedAction("IDENTIFY");
+  assert.equal(statuses.at(-1)[0], "Locate light on for slot 00, confirmed through synthetic enclosure.");
+});
+
+test("locate completion patches the newest snapshot after a same-scope refresh", async () => {
+  const pending = deferred();
+  const originSlot = {slot:0, slot_label:"00", led_supported:true, identify_active:false};
+  const state = {
+    snapshotMode:false,
+    snapshot:{selected_system_id:"a", selected_enclosure_id:"one", slots:[originSlot]},
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>originSlot,
+    setStatus(){}, sendScopedRequest:async()=>pending.promise,
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", ...guardNames, "sendLedAction"], context);
+  const run = c.sendLedAction("IDENTIFY");
+  await new Promise(resolve=>setImmediate(resolve));
+  state.latestRefreshToken++;
+  const refreshedSnapshot = {
+    selected_system_id:"a", selected_enclosure_id:"one", refreshed_marker:true,
+    slots:[{slot:0, slot_label:"00", identify_active:false}],
+  };
+  state.snapshot = refreshedSnapshot;
+  pending.resolve({
+    ok:true, system_id:"a", enclosure_id:"one", slot:0, slot_label:"00",
+    requested_active:true, identify_active:true, confirmed:true, readback_supported:true, paths:[],
+  });
+  await run;
+
+  assert.equal(state.snapshot, refreshedSnapshot, "the completed refresh remains authoritative");
+  assert.equal(state.snapshot.slots[0].identify_active, true);
+  assert.equal(state.snapshotReuseCache["a::one"].refreshed_marker, true);
+  assert.equal(state.snapshotReuseCache["a::one"].slots[0].identify_active, true);
+});
+
+test("locate mismatch patches the readback state and shows a plain warning", async () => {
+  const statuses = [];
+  const slot = {slot:0, slot_label:"00", led_supported:true, identify_active:true};
+  const state = {
+    snapshotMode:false,
+    snapshot:{selected_system_id:"a", selected_enclosure_id:"one", slots:[slot]},
+    selectedSystemId:"a", selectedEnclosureId:"one", selectedSlot:0,
+    latestRefreshToken:1, selectionEpoch:0, mappingDraftRevision:0,
+    snapshotReuseCache:{}, mutationsInFlight:{}, mutationResults:{},
+  };
+  const context = {
+    state, URLSearchParams,
+    writeBlockedByPolicy:()=>false,
+    getSlotById:()=>slot,
+    setStatus(message, tone){ statuses.push([message, tone || "info"]); },
+    sendScopedRequest:async()=>({
+      ok:true, system_id:"a", enclosure_id:"one", slot:0, slot_label:"00",
+      requested_active:true, identify_active:false, confirmed:false, readback_supported:true,
+      paths:[{ses_device:"/dev/ses0", ses_element_id:7, identify_active:false}],
+    }),
+    applySnapshot(){}, renderAll(){}, locateLightSourceLabel:()=>"synthetic enclosure",
+    handleWriteRejection(){},
+  };
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", ...guardNames, "sendLedAction"], context);
+  await c.sendLedAction("IDENTIFY");
+
+  assert.equal(state.snapshot.slots[0].identify_active, false);
+  assert.deepEqual(statuses.at(-1), [
+    "The enclosure did not confirm the locate light is on for slot 00.",
+    "warning",
+  ]);
+});
+
 for (const outcome of ["success", "failure"]) {
   test(`auto-refresh timer waits for an in-flight locate write (${outcome})`, async () => {
     const pending = deferred();
@@ -70,14 +394,17 @@ for (const outcome of ["success", "failure"]) {
       sendScopedRequest:async ()=>pending.promise,
       applySnapshot(){}, renderAll(){}, scheduleSmartPrefetch(){}, locateLightSourceLabel:()=>"synthetic",
       handleWriteRejection(){ rejections++; } };
-    const c = load([...guardNames, "sendLedAction", "scheduleAutoRefresh"], context);
+    const c = load(["cloneJsonValue", "snapshotReuseCacheKey", ...guardNames, "sendLedAction", "scheduleAutoRefresh"], context);
     c.scheduleAutoRefresh();
     const run = c.sendLedAction("IDENTIFY");
     await new Promise(r => setImmediate(r));
     await timers.shift()();
     assert.equal(refreshes, 0, "the timer must not start a refresh while a write is in flight");
     assert.equal(timers.length, 1, "the timer reschedules itself instead");
-    if (outcome === "success") pending.resolve({snapshot:{selected_system_id:"a",selected_enclosure_id:"one"}});
+    if (outcome === "success") pending.resolve({
+      ok:true, system_id:"a", enclosure_id:"one", slot:0, slot_label:"00",
+      requested_active:true, identify_active:true, confirmed:true, readback_supported:true, paths:[],
+    });
     else { const err = new Error("Request failed with 403"); err.status = 403; pending.reject(err); }
     await run;
     const [message, tone] = statuses[statuses.length - 1];
@@ -100,14 +427,17 @@ test("a write started before a manual refresh does not hold the next auto-refres
     setStatus(){}, sendScopedRequest:async ()=>pending.promise,
     applySnapshot(){}, renderAll(){}, scheduleSmartPrefetch(){}, locateLightSourceLabel:()=>"synthetic",
     handleWriteRejection(){} };
-  const c = load([...guardNames, "sendLedAction", "scheduleAutoRefresh"], context);
+  const c = load(["cloneJsonValue", "snapshotReuseCacheKey", ...guardNames, "sendLedAction", "scheduleAutoRefresh"], context);
   c.scheduleAutoRefresh();
   const run = c.sendLedAction("IDENTIFY");
   await new Promise(r => setImmediate(r));
   state.latestRefreshToken++; // a manual refresh moved the epoch; the write is now stale
   await timers.shift()();
   assert.equal(refreshes, 1, "a stale write must not postpone auto-refresh for the new epoch");
-  pending.resolve({snapshot:{selected_system_id:"a",selected_enclosure_id:"one"}});
+  pending.resolve({
+    ok:true, system_id:"a", enclosure_id:"one", slot:0, slot_label:"00",
+    requested_active:true, identify_active:true, confirmed:true, readback_supported:true, paths:[],
+  });
   await run;
 });
 

@@ -49,6 +49,10 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   cannot tell you. (#939)
 ### Fixed
 
+- Made locate-light actions use a short independent session, return immediate
+  hardware confirmation, and retain their result across page refreshes. Each
+  press first checks, in the same session, that the enclosure device still
+  reports the shelf the bay was found on, and refuses if it does not (#934).
 - Prevented overlapping history and background inventory refreshes from
   returning retryable busy errors when another enclosure published first (#932).
 - History records UNVR and UNVR Pro bays again when only an optional SSH
