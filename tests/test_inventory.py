@@ -15047,6 +15047,12 @@ class InventoryServiceSnapshotStateBoundsTests(unittest.IsolatedAsyncioTestCase)
                     await release_older.wait()
                     return older
                 self.assertEqual(selected_enclosure_id, "enc-b")
+                # A real forced refresh records the sources it collected after
+                # the older click; the older forced request may reuse only a
+                # value built from sources that new.
+                inventory_module._snapshot_build_source_publications.get().append(
+                    inventory_module.SourcePublication(sequence=1, sg_cache_generation=1)
+                )
                 return newer
 
             service._build_snapshot = AsyncMock(side_effect=build_snapshot)
@@ -16488,7 +16494,7 @@ class InventoryServiceMutationRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(service._cache["enc-a"], stale_a)
             self.assertIs(service._cache["enc-b"], refreshed_b)
 
-    async def test_foreground_refresh_superseded_by_other_key_reuses_public_snapshot(self) -> None:
+    async def test_foreground_refresh_superseded_by_other_key_never_returns_an_expired_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings()
             system = SystemConfig(id="history-overlap", truenas=TrueNASConfig(platform="core"))
@@ -16548,9 +16554,110 @@ class InventoryServiceMutationRefreshTests(unittest.IsolatedAsyncioTestCase):
             )
             release_build_a.set()
 
-            self.assertIs(await asyncio.wait_for(refresh_a, timeout=0.5), public_a)
+            # The public A is expired and predates the forced click, so it must
+            # not stand in for the superseded candidate: the retryable busy
+            # error is returned instead of obsolete bay identity.
+            with self.assertRaises(inventory_module.SnapshotStateBusyError):
+                await asyncio.wait_for(refresh_a, timeout=0.5)
             self.assertIs(service._cache["enc-a"], public_a)
             self.assertIs(service._cache["enc-b"], refreshed_b)
+
+    def _superseded_service(self, temp_dir: str, *, public_a_expired: bool):
+        system = SystemConfig(id="history-overlap", truenas=TrueNASConfig(platform="core"))
+        service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
+        options = [
+            EnclosureOption(id="enc-a", label="Shelf A"),
+            EnclosureOption(id="enc-b", label="Shelf B"),
+        ]
+        public_a = InventorySnapshot(
+            slots=[],
+            refresh_interval_seconds=30,
+            selected_system_id=system.id,
+            selected_system_platform="core",
+            selected_enclosure_id="enc-a",
+            enclosures=options,
+            warnings=["public A"],
+        )
+        service._canonical_enclosure_options = {option.id: option for option in options}
+        service._canonical_default_enclosure_id = "enc-a"
+        service._cache["enc-a"] = public_a
+        service._cache_until["enc-a"] = datetime.now(timezone.utc) + (
+            timedelta(seconds=-1) if public_a_expired else timedelta(minutes=5)
+        )
+        service._snapshot_published_sequence["enc-a"] = 0
+        service._touch_snapshot_key("enc-a")
+        return service, public_a
+
+    async def _race_a_against_b(self, service, template, request_a, *, on_a_started=None):
+        """Run request_a; while its A build waits, a newer enclosure-B refresh publishes."""
+        a_builds = 0
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def build_snapshot(selected_enclosure_id=None, *, force_source_refresh=False):
+            nonlocal a_builds
+            if selected_enclosure_id == "enc-b":
+                return template.model_copy(update={"selected_enclosure_id": "enc-b", "warnings": ["B"]})
+            a_builds += 1
+            started.set()
+            await gate.wait()
+            return template.model_copy(update={"warnings": [f"A {a_builds}"]})
+
+        service._build_snapshot = AsyncMock(side_effect=build_snapshot)
+        task = asyncio.create_task(request_a())
+        await asyncio.wait_for(started.wait(), timeout=0.5)
+        if on_a_started is not None:
+            on_a_started()
+        await service.get_snapshot(force_refresh=True, selected_enclosure_id="enc-b")
+        gate.set()
+        try:
+            result = await asyncio.wait_for(task, timeout=0.5)
+        except Exception as exc:  # noqa: BLE001 - returned for the caller to assert.
+            result = exc
+        return result, a_builds
+
+    async def test_superseded_forced_refresh_never_returns_a_value_from_before_the_click(self) -> None:
+        # Even an unexpired public value was built from sources older than the
+        # forced click, so it cannot stand in for the superseded build.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, public_a = self._superseded_service(temp_dir, public_a_expired=False)
+            result, a_builds = await self._race_a_against_b(
+                service,
+                public_a,
+                lambda: service.get_snapshot(force_refresh=True, selected_enclosure_id="enc-a"),
+            )
+            self.assertIsInstance(result, inventory_module.SnapshotStateBusyError)
+            self.assertEqual(a_builds, 1)
+            self.assertIs(service._cache["enc-a"], public_a)
+
+    async def test_superseded_ordinary_refresh_does_not_return_an_expired_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, public_a = self._superseded_service(temp_dir, public_a_expired=True)
+            result, _a_builds = await self._race_a_against_b(
+                service,
+                public_a,
+                lambda: service.get_snapshot(selected_enclosure_id="enc-a"),
+            )
+            self.assertIsInstance(result, inventory_module.SnapshotStateBusyError)
+            self.assertIs(service._cache["enc-a"], public_a)
+
+    async def test_superseded_ordinary_refresh_reuses_a_value_that_is_valid_again(self) -> None:
+        # The #928 behaviour stays: an ordinary request reuses a public value
+        # that is valid when it is superseded, with no busy error.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, public_a = self._superseded_service(temp_dir, public_a_expired=True)
+
+            def republished() -> None:
+                service._cache_until["enc-a"] = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+            result, a_builds = await self._race_a_against_b(
+                service,
+                public_a,
+                lambda: service.get_snapshot(selected_enclosure_id="enc-a"),
+                on_a_started=republished,
+            )
+            self.assertIs(result, public_a)
+            self.assertEqual(a_builds, 1)
 
     async def test_failed_background_source_refresh_does_not_rebuild_stale_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

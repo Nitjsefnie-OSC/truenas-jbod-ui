@@ -954,6 +954,10 @@ class SnapshotStateBusyError(Exception):
         super().__init__("The server is busy. Try again in a moment.")
 
 
+class SupersededSnapshotRefreshError(SnapshotStateBusyError):
+    """A newer topology publication superseded this build and no current value can stand in."""
+
+
 class SystemRetentionBusyError(Exception):
     """Raised when a system-wide retention check is already running for the system."""
 
@@ -1648,6 +1652,7 @@ class InventoryService:
                 current = self._current_snapshot_for_superseded_refresh(
                     publication_key,
                     request_sequence=request_sequence,
+                    minimum_source_publication=required_source_publication,
                 )
                 if current is not None:
                     add_perf_metadata(snapshot_cache="hit-after-wait", snapshot_cache_key=publication_key)
@@ -1655,7 +1660,7 @@ class InventoryService:
                     return CacheResult(current, "hit-after-wait")
                 # Reject before admission so a stale redirect cannot evict an
                 # unrelated valid key merely to fail the sequence fence below.
-                raise SnapshotStateBusyError()
+                raise SupersededSnapshotRefreshError()
             self._admit_snapshot_key(publication_key)
             redirected_publication = publication_key != cache_key
             if redirected_publication:
@@ -1771,6 +1776,7 @@ class InventoryService:
         cache_key: str,
         *,
         request_sequence: int,
+        minimum_source_publication: SourcePublication | None,
     ) -> InventorySnapshot | None:
         if request_sequence >= self._canonical_options_request_sequence:
             return None
@@ -1778,6 +1784,14 @@ class InventoryService:
             return None
         current = self._cache.get(cache_key)
         if current is None:
+            return None
+        # Stand in only with a value this request would accept: unexpired, and
+        # built from sources at least as new as it needs (a forced refresh
+        # needs sources collected after the click). Otherwise fail closed as
+        # busy rather than show obsolete bay or disk identity.
+        if utcnow() >= self._cache_until.get(cache_key, datetime.min.replace(tzinfo=timezone.utc)):
+            return None
+        if not self._snapshot_meets_source_requirement(cache_key, minimum_source_publication):
             return None
         # A system-wide options publication can supersede another enclosure's
         # candidate. Keep serving its already-public value; never publish the
@@ -1815,10 +1829,11 @@ class InventoryService:
             current = self._current_snapshot_for_superseded_refresh(
                 cache_key,
                 request_sequence=request_sequence,
+                minimum_source_publication=minimum_source_publication,
             )
             if current is not None:
                 return current, False
-            raise SnapshotStateBusyError()
+            raise SupersededSnapshotRefreshError()
         self._cache[cache_key] = snapshot
         self._cache_until[cache_key] = utcnow() + timedelta(
             seconds=max(0, int(self.settings.app.snapshot_cache_ttl_seconds))
@@ -4431,6 +4446,11 @@ class InventoryService:
                 force_source_refresh=False,
                 minimum_source_publication=minimum_source_publication,
             )
+        except SupersededSnapshotRefreshError:
+            # Another enclosure published newer topology first and the cached
+            # value cannot stand in; the next request schedules another
+            # refresh. Not an error (#928).
+            logger.debug("Background snapshot refresh for %s was superseded.", cache_key)
         except Exception:  # noqa: BLE001 - background refreshes should stay best-effort.
             logger.exception("Background snapshot refresh failed for %s", cache_key)
 
