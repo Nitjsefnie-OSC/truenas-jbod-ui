@@ -33,6 +33,8 @@
   const heatmapSampleCache = new WeakMap();
   const ANNUALIZED_MIN_POWER_ON_HOURS = 24 * 30;
   const HISTORY_UI_STORAGE_KEY = "truenas-jbod-ui.history-ui.v1";
+  const SES_SWAP_TITLE =
+    "Reseated or replaced: the enclosure saw a disk removed and inserted in this bay since its swap flag was last cleared. It does not record when.";
   const EXPORT_UI_STORAGE_KEY = "truenas-jbod-ui.export-ui.v1";
   const snapshotMode = Boolean(bootstrap.snapshotMode);
   const preloadedSasFabric = snapshotMode ? (bootstrap.preloadedSasFabric || null) : null;
@@ -124,6 +126,7 @@
     refreshesInFlight: 0,
     latestRefreshToken: 0,
     storageViewsRuntimeRequestToken: 0,
+    pendingDefaultSelection: false,
     snapshotExportSourceGeneration: 0,
     smartSummaries: {},
     preloadedSmartSummariesBySlot,
@@ -216,6 +219,7 @@
       pendingScopeKey: null,
       selectedTraceId: null,
       selectedNodeId: null,
+      selectionCleared: false,
       expandedSlotLists: {},
       requestToken: 0,
     },
@@ -259,6 +263,7 @@
   const sasFabricToggleButton = document.getElementById("sas-fabric-toggle-button");
   const sasFabricViewLink = document.getElementById("sas-fabric-view-link");
   const sasFabricPanel = document.getElementById("sas-fabric-panel");
+  const sasFabricShowAllButton = document.getElementById("sas-fabric-show-all-button");
   const sasFabricRefreshButton = document.getElementById("sas-fabric-refresh-button");
   const sasFabricSummary = document.getElementById("sas-fabric-summary");
   const sasFabricStatus = document.getElementById("sas-fabric-status");
@@ -538,11 +543,21 @@
     const availableViews = Array.isArray(bootstrapData.storageViewsRuntime?.views)
       ? bootstrapData.storageViewsRuntime.views
       : [];
+    const locationParams = new URLSearchParams(locationSearch);
+    const explicitStorageViewId = locationParams.get("storage_view_id") || "";
+    const explicitEnclosureId = locationParams.get("enclosure_id") || "";
+    const defaultSelection = String(bootstrapData.storageViewsRuntime?.default_selection || "");
+    const defaultStorageViewId = defaultSelection.startsWith("view:")
+      ? defaultSelection.slice("view:".length)
+      : "";
+    const validDefaultStorageViewId = availableViews.some(
+      (view) => view.id === defaultStorageViewId && isMainUiStorageViewRuntimeOption(view)
+    ) ? defaultStorageViewId : "";
     const storageViewId = isSnapshotMode
       ? (availableViews.some((view) => view.id === requestedStorageViewId && isMainUiStorageViewRuntimeOption(view))
         ? requestedStorageViewId
         : "")
-      : (new URLSearchParams(locationSearch).get("storage_view_id") || "");
+      : (explicitStorageViewId || (explicitEnclosureId ? "" : validDefaultStorageViewId));
     const unresolvedSnapshotView = Boolean(
       isSnapshotMode && requestedStorageViewId && !storageViewId
     );
@@ -1715,6 +1730,8 @@
 
   function openSasFabricPanel() {
     state.sasFabric.open = true;
+    state.sasFabric.selectionCleared = false;
+    syncSasFabricTraceToSlot(state.selectedSlot);
     renderAll();
     if (sasFabricPanel) {
       sasFabricPanel.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1744,6 +1761,7 @@
     state.sasFabric.pendingScopeKey = null;
     state.sasFabric.selectedTraceId = null;
     state.sasFabric.selectedNodeId = null;
+    state.sasFabric.selectionCleared = false;
     state.sasFabric.expandedSlotLists = {};
     state.sasFabric.requestToken += 1;
   }
@@ -1787,28 +1805,12 @@
   }
 
   function defaultSasFabricTraceId(fabric = state.sasFabric.data) {
-    const traces = sasFabricList(fabric?.traces);
-    if (!traces.length) {
+    if (state.sasFabric.selectionCleared || !Number.isInteger(state.selectedSlot)) {
       return null;
     }
-    if (Number.isInteger(state.selectedSlot)) {
-      const bayTraceId = `bay:${state.selectedSlot}`;
-      if (traces.some((trace) => trace.id === bayTraceId)) {
-        return bayTraceId;
-      }
-    }
-    const degradedPath = traces.find((trace) => {
-      if (trace.kind !== "path") {
-        return false;
-      }
-      const stateName = sasFabricClassToken(trace.metrics?.state || trace.status || trace.label);
-      return !["active", "online", "passive", "standby"].includes(stateName);
-    });
-    if (degradedPath) {
-      return degradedPath.id;
-    }
-    const firstPath = traces.find((trace) => trace.kind === "path");
-    return (firstPath || traces[0]).id;
+    const traces = sasFabricList(fabric?.traces);
+    const bayTraceId = `bay:${state.selectedSlot}`;
+    return traces.some((trace) => trace.id === bayTraceId) ? bayTraceId : null;
   }
 
   function resolveSasFabricTraceId(traceId, fabric = state.sasFabric.data) {
@@ -1842,27 +1844,59 @@
   }
 
   function syncSasFabricTraceToSlot(slotNumber) {
-    if (!Number.isInteger(slotNumber) || !state.sasFabric.data) {
+    if (!Number.isInteger(slotNumber)) {
+      return;
+    }
+    state.sasFabric.selectionCleared = false;
+    if (!state.sasFabric.data) {
       return;
     }
     const traceId = `bay:${slotNumber}`;
-    if (sasFabricTraceById(traceId)) {
-      state.sasFabric.selectedTraceId = traceId;
-      state.sasFabric.selectedNodeId = null;
-    }
+    state.sasFabric.selectedTraceId = sasFabricTraceById(traceId) ? traceId : null;
+    state.sasFabric.selectedNodeId = null;
   }
 
   function clearSasFabricBaySelection() {
     const trace = selectedSasFabricTrace();
     if (trace?.kind === "bay") {
-      state.sasFabric.selectedTraceId = defaultSasFabricTraceId();
+      state.sasFabric.selectedTraceId = null;
+      state.sasFabric.selectedNodeId = null;
+      state.sasFabric.selectionCleared = true;
     }
+  }
+
+  function clearSasFabricSelection() {
+    const trace = selectedSasFabricTrace();
+    if (!trace && !selectedSasFabricNode()) {
+      return false;
+    }
+    if (trace?.kind === "bay" && state.selectedSlot !== null) {
+      return clearSelectedSlot();
+    }
+    state.sasFabric.selectedTraceId = null;
+    state.sasFabric.selectedNodeId = null;
+    state.sasFabric.selectionCleared = true;
+    renderAll();
+    return true;
+  }
+
+  function sasFabricEscapeClearBlocked(event) {
+    if (event.target?.closest?.("input, textarea, select, [contenteditable='true']")) {
+      return true;
+    }
+    if (enclosureAliasForm && !enclosureAliasForm.classList.contains("hidden")) {
+      return true;
+    }
+    return Boolean(document.querySelector("dialog[open]"));
   }
 
   function selectSasFabricTrace(traceId, { syncSlot = true } = {}) {
     const trace = sasFabricTraceById(traceId);
     if (!trace) {
       return false;
+    }
+    if (state.sasFabric.selectedTraceId === trace.id && !state.sasFabric.selectedNodeId) {
+      return clearSasFabricSelection();
     }
     const slots = sasFabricSortedSlots(trace.slots);
     const nextSlot = syncSlot && trace.kind === "bay" && slots.length === 1
@@ -1873,6 +1907,7 @@
     }
     state.sasFabric.selectedTraceId = trace.id;
     state.sasFabric.selectedNodeId = null;
+    state.sasFabric.selectionCleared = false;
     if (nextSlot !== null) {
       state.selectedSlot = nextSlot;
       state.history.panelError = null;
@@ -1883,11 +1918,16 @@
 
   function selectSasFabricNode(nodeId) {
     if (!sasFabricNodeById(nodeId)) {
-      return;
+      return false;
+    }
+    if (state.sasFabric.selectedNodeId === nodeId && !state.sasFabric.selectedTraceId) {
+      return clearSasFabricSelection();
     }
     state.sasFabric.selectedNodeId = nodeId;
     state.sasFabric.selectedTraceId = null;
+    state.sasFabric.selectionCleared = false;
     renderAll();
+    return true;
   }
 
   // Fabric bays belong to the rendered enclosure snapshot, not the storage
@@ -1922,6 +1962,9 @@
   function selectSasFabricSlot(slotNumber) {
     if (!Number.isInteger(slotNumber)) {
       return false;
+    }
+    if (state.sasFabric?.selectedTraceId === `bay:${slotNumber}` && !state.sasFabric.selectedNodeId) {
+      return clearSasFabricSelection();
     }
     const viewSlot = sasFabricViewSlotForBay(slotNumber);
     if (viewSlot === null) {
@@ -2363,6 +2406,12 @@
     if (sasFabricRefreshButton) {
       sasFabricRefreshButton.disabled = state.snapshotMode || state.sasFabric.loading;
     }
+    if (sasFabricShowAllButton) {
+      sasFabricShowAllButton.classList.toggle(
+        "hidden",
+        !selectedSasFabricTrace() && !selectedSasFabricNode(),
+      );
+    }
     if (!state.sasFabric.open) {
       return;
     }
@@ -2455,9 +2504,11 @@
       state.sasFabric.data = payload;
       state.sasFabric.scopeKey = scopeKey;
       state.sasFabric.error = null;
-      state.sasFabric.selectedTraceId = resolveSasFabricTraceId(state.sasFabric.selectedTraceId, payload);
       if (state.sasFabric.selectedNodeId && !sasFabricNodeById(state.sasFabric.selectedNodeId, payload)) {
         state.sasFabric.selectedNodeId = null;
+      }
+      if (!state.sasFabric.selectedNodeId) {
+        state.sasFabric.selectedTraceId = resolveSasFabricTraceId(state.sasFabric.selectedTraceId, payload);
       }
       if (!quiet) {
         setStatus("Storage Fabric refreshed.");
@@ -3550,7 +3601,7 @@
   // candidate was recorded in another enclosure must not borrow this bay.
   function storageViewSlotBayInEnclosure(slot, enclosureId) {
     const slotEnclosureId = slot?.snapshot_enclosure_id ?? null;
-    return slotEnclosureId === null || (Boolean(enclosureId) && slotEnclosureId === enclosureId);
+    return Boolean(slotEnclosureId) && Boolean(enclosureId) && slotEnclosureId === enclosureId;
   }
 
   function getLiveBackedStorageViewSlot(view, slot) {
@@ -3562,6 +3613,17 @@
       return null;
     }
     return getSlotById(slot.snapshot_slot);
+  }
+
+  function reportStorageViewActionMismatch() {
+    if (!state.selectedStorageViewRuntimeId) {
+      return false;
+    }
+    setStatus(
+      "Live actions are unavailable because this saved chassis is backed by a different enclosure than the page snapshot.",
+      "error",
+    );
+    return true;
   }
 
   function persistentIdLabel(slot) {
@@ -3843,13 +3905,21 @@
     };
   }
 
+  function storageViewHistoryParams(view) {
+    const params = buildSelectionParams();
+    if (view?.source === "selected_enclosure_snapshot" && view.backing_enclosure_id) {
+      params.set("enclosure_id", view.backing_enclosure_id);
+    }
+    return params;
+  }
+
   function getSelectedHistoryTarget() {
     const selectedStorageView = getSelectedStorageViewRuntime();
     const storageViewSlot = selectedStorageView ? getSelectedStorageViewRuntimeSlot(state.selectedSlot) : null;
     const windowHours = currentHistoryWindowHours();
     if (selectedStorageView && storageViewSlot) {
       const slot = buildStorageViewHistoryContextSlot(selectedStorageView, storageViewSlot);
-      const params = buildSelectionParams();
+      const params = storageViewHistoryParams(selectedStorageView);
       if (Number.isInteger(windowHours)) {
         params.set("window_hours", String(windowHours));
       }
@@ -4419,6 +4489,48 @@
     return host || "n/a";
   }
 
+  // The enclosure reports a bay as a status name and its four SES status bytes,
+  // such as "OK (0x11 0x00 0x00 0x00)". Byte 0 holds the status code in its low
+  // four bits and the predicted-failure (0x40), disabled (0x20) and swap (0x10)
+  // flags above it (SES-3 table 72). Other health text passes through. The text
+  // comes from the appliance and runs on every grid render, so the byte suffix
+  // is found by position and only that short tail is matched, and the shown
+  // value is capped.
+  function formatSlotHealth(value) {
+    if (value === null || value === undefined) {
+      return value;
+    }
+    const text = String(value).trim();
+    const open = text.endsWith(")") ? text.lastIndexOf("(") : -1;
+    const bytes = open >= 0 && text.length - open <= 40
+      ? text.slice(open).match(/^\((0x[0-9a-f]{2})\s+0x[0-9a-f]{2}\s+0x[0-9a-f]{2}\s+0x[0-9a-f]{2}\)$/i)
+      : null;
+    let shown = text;
+    if (bytes) {
+      const common = Number.parseInt(bytes[1], 16);
+      if ((common & 0x0f) === 0x05) {
+        return "Empty bay";
+      }
+      const parts = [text.slice(0, open).trim() || "Unknown"];
+      if (common & 0x40) parts.push("predicted failure");
+      if (common & 0x20) parts.push("disabled");
+      if (common & 0x10) parts.push("reseated or replaced");
+      shown = parts.join(", ");
+    }
+    return shown.length > 160 ? `${shown.slice(0, 159)}\u2026` : shown;
+  }
+
+  function slotHealthTitle(value) {
+    const text = value === null || value === undefined ? "" : String(value).trim();
+    const open = text.endsWith(")") ? text.lastIndexOf("(") : -1;
+    if (open < 0 || text.length - open > 40 || !/^\(0x[0-9a-f]{2}(?:\s+0x[0-9a-f]{2}){3}\)$/i.test(text.slice(open))) {
+      return "";
+    }
+    const name = text.slice(0, open).trim();
+    const shownName = name.length > 120 ? `${name.slice(0, 119)}\u2026` : name;
+    return `Enclosure status: ${shownName ? `${shownName} ` : ""}${text.slice(open)}`;
+  }
+
   function formatSesStateValue(slot) {
     const flags = [];
     if (slot?.raw_status?.ses_hot_spare) {
@@ -4438,6 +4550,9 @@
     }
     if (slot?.raw_status?.ses_disabled) {
       flags.push("Disabled");
+    }
+    if (slot?.raw_status?.ses_swapped) {
+      flags.push("Reseated or replaced");
     }
     return flags.length ? flags.join(", ") : "n/a";
   }
@@ -5691,7 +5806,9 @@
       return null;
     }
     const selectedView = getSelectedStorageViewRuntime();
-    const params = buildSelectionParams();
+    const params = selectedView
+      ? storageViewHistoryParams(selectedView)
+      : buildSelectionParams();
     const windowHours = currentHeatmapWindowHours();
     const boundedWindowHours = Number.isInteger(windowHours)
       ? Math.max(1, Math.min(8760, windowHours))
@@ -6050,9 +6167,10 @@
       slot.serial ? `Serial: ${slot.serial}` : "Serial: n/a",
       persistentIdText,
       slot.pool_name ? `Pool: ${slot.pool_name}` : "Pool: n/a",
-      slot.health ? `Health: ${slot.health}` : null,
+      slot.health ? `Health: ${formatSlotHealth(slot.health)}` : null,
       slot.target_system_label ? `Target: ${slot.target_system_label}` : null,
       slot.placement_key ? `Placement: ${slot.placement_key}` : null,
+      getLiveBackedStorageViewSlot(selectedView, slot)?.identify_active ? "Locate light on" : null,
     ].filter(Boolean);
 
     appendSmartTooltipMetrics(lines, slot, smartEntry);
@@ -6088,8 +6206,11 @@
       persistentIdText,
       slot.pool_name ? `${poolLabel}: ${slot.pool_name}` : `${poolLabel}: n/a`,
       slot.vdev_name ? `${vdevLabel}: ${slot.vdev_name}` : `${vdevLabel}: n/a`,
-      slot.health ? `Health: ${slot.health}` : "Health: n/a",
+      slot.health ? `Health: ${formatSlotHealth(slot.health)}` : "Health: n/a",
     ];
+    if (slot.identify_active) {
+      lines.push("Locate light on");
+    }
 
     appendSmartTooltipMetrics(lines, slot, smartEntry);
 
@@ -6098,10 +6219,10 @@
       if (sesHost !== "n/a") {
         lines.push(`SES Host: ${sesHost}`);
       }
-      const sesState = formatSesStateValue(slot);
-      if (sesState !== "n/a") {
-        lines.push(`SES Flags: ${sesState}`);
-      }
+    }
+    const sesState = formatSesStateValue(slot);
+    if (sesState !== "n/a") {
+      lines.push(`SES Flags: ${sesState}`);
     }
 
     return appendHeatmapTooltipLines(lines, slot.slot);
@@ -6117,7 +6238,10 @@
     if (slot.pool_name) {
       parts.push(`${currentPlatform() === "linux" ? "mount" : "pool"} ${slot.pool_name}`);
     }
-    parts.push(slot.health ? String(slot.health).toLowerCase() : stateLabel(slot).toLowerCase());
+    parts.push(slot.health ? formatSlotHealth(slot.health).toLowerCase() : stateLabel(slot).toLowerCase());
+    if (slot.identify_active) {
+      parts.push("Locate light on");
+    }
     return parts.join(", ");
   }
 
@@ -6690,8 +6814,9 @@
       return;
     }
     const bays = [];
-    // Selected, peer and fabric tiles draw a ring instead of a chip.
-    grid.querySelectorAll(".slot-tile[data-slot]:not(.selected, .peer-highlight, .fabric-highlight)").forEach((tile) => {
+    // #925: every bay draws its chip, ringed ones included (the ring is an
+    // outline on the tile), so every bay steers the spot.
+    grid.querySelectorAll(".slot-tile[data-slot]").forEach((tile) => {
       if (!tile.clientWidth) {
         return;
       }
@@ -6844,24 +6969,25 @@
     finishGridRender();
   }
 
-  function kvRow(label, value, copyable = false) {
+  function kvRow(label, value, copyable = false, title = "") {
     const hasValue = value !== null && value !== undefined && value !== "";
     const safeValue = escapeHtml(hasValue ? String(value) : "n/a");
     const encodedValue = hasValue ? encodeURIComponent(String(value)) : "";
+    const titleAttribute = title ? ` title="${escapeHtml(title)}"` : "";
     return `
       <div class="kv-row">
         <div class="kv-label">${escapeHtml(label)}</div>
-        <div class="kv-value">${safeValue}</div>
+        <div class="kv-value"${titleAttribute}>${safeValue}</div>
         <div>${copyable && hasValue ? `<button class="copy-button" data-copy="${encodedValue}">Copy</button>` : ""}</div>
       </div>
     `;
   }
 
-  function kvRowIfMeaningful(label, value, copyable = false) {
+  function kvRowIfMeaningful(label, value, copyable = false, title = "") {
     if (value === null || value === undefined || value === "" || value === "n/a") {
       return "";
     }
-    return kvRow(label, value, copyable);
+    return kvRow(label, value, copyable, title);
   }
 
   function isEmptyBay(slot) {
@@ -8836,7 +8962,7 @@
         showQuantastorContext ? kvRowIfMeaningful("I/O Fence On", formatQuantastorContextValue(slot, "fence_owner_label")) : "",
         showQuantastorContext ? kvRowIfMeaningful("Visible On", formatVisibleOnValue(slot)) : "",
         showQuantastorContext ? kvRowIfMeaningful("SES Host", formatSesHostValue(slot)) : "",
-        kvRow(state.snapshotMode ? "Health at capture" : "Health", slot.health),
+        kvRow(state.snapshotMode ? "Health at capture" : "Health", formatSlotHealth(slot.health), false, slotHealthTitle(slot.health)),
         kvRowIfMeaningful("Temp", formatTemperatureValue(slot, smartEntry)),
         kvRowIfMeaningful(
           state.snapshotMode ? "SMART Status at capture" : "SMART Status",
@@ -8883,7 +9009,7 @@
           showSasTransportFields ? kvRowIfMeaningful("SAS Address", formatSasAddressValue(slot, smartEntry)) : "",
           showSasTransportFields ? kvRowIfMeaningful("Attached SAS", formatAttachedSasAddressValue(slot, smartEntry)) : "",
           showLinkRate ? kvRowIfMeaningful("Link Rate", formatLinkRateValue(smartEntry)) : "",
-          showQuantastorContext ? kvRowIfMeaningful("SES Flags", formatSesStateValue(slot)) : "",
+          kvRowIfMeaningful("SES Flags", formatSesStateValue(slot), false, slot?.raw_status?.ses_swapped ? SES_SWAP_TITLE : ""),
         ]),
       ].filter(Boolean).join("");
     detailKvGrid.querySelector(".detail-smart-details")?.addEventListener("toggle", (event) => {
@@ -8952,6 +9078,9 @@
       detailContent.classList.remove("hidden");
       detailSecondary.classList.add("hidden");
       detailLedControls.classList.add("hidden");
+      ledButtons.forEach((button) => {
+        button.disabled = true;
+      });
       detailSlotTitle.textContent = `${selectedStorageView.label} / ${storageViewSlot.slot_label}`;
       detailStatePill.textContent = stateLabel(storageViewSlot);
       detailStatePill.className = `state-pill state-${storageViewSlot.state === "matched" ? "healthy" : (storageViewSlot.state || "unknown")}`;
@@ -8979,7 +9108,12 @@
         kvRowIfMeaningful("Namespace EUI64", formatNamespaceEui64Value(storageViewSlot, smartEntry), true),
         kvRowIfMeaningful("Namespace NGUID", formatNamespaceNguidValue(smartEntry), true),
         kvRowIfMeaningful("Pool", storageViewSlot.pool_name),
-        kvRowIfMeaningful(state.snapshotMode ? "Health at capture" : "Health", storageViewSlot.health),
+        kvRowIfMeaningful(
+          state.snapshotMode ? "Health at capture" : "Health",
+          formatSlotHealth(storageViewSlot.health),
+          false,
+          slotHealthTitle(storageViewSlot.health),
+        ),
         kvRow("Temp", formatTemperatureValue(storageViewSlot, smartEntry)),
         kvRowIfMeaningful("Warning Temp", formatWarningTemperatureValue(smartEntry)),
         kvRowIfMeaningful("Critical Temp", formatCriticalTemperatureValue(smartEntry)),
@@ -10102,6 +10236,28 @@
     staticText.classList.toggle("hidden", !asText);
   }
 
+  function orderedMainSelectorEntries(enclosures, storageViews, effectiveOrder = []) {
+    const entries = [
+      ...enclosures.map((item) => ({ key: `enclosure:${item.id}`, kind: "enclosure", item })),
+      ...storageViews.map((item) => ({ key: `view:${item.id}`, kind: "view", item })),
+    ];
+    const byKey = new Map(entries.map((entry) => [entry.key, entry]));
+    const ordered = [];
+    const added = new Set();
+    effectiveOrder.forEach((key) => {
+      const entry = byKey.get(key);
+      if (!entry || added.has(key)) return;
+      ordered.push(entry);
+      added.add(key);
+    });
+    entries.forEach((entry) => {
+      if (added.has(entry.key)) return;
+      ordered.push(entry);
+      added.add(entry.key);
+    });
+    return ordered;
+  }
+
   function renderSelectors() {
     const systems = state.snapshot.systems || [];
     const enclosures = state.snapshot.enclosures || [];
@@ -10136,22 +10292,17 @@
       if (!visibleEnclosures.length && !storageViews.length) {
         enclosureOptionsHtml = '<option value="">No enclosures found</option>';
       } else {
-        const enclosureOptions = visibleEnclosures
-          .map((enclosure) => `<option value="enclosure:${escapeHtml(enclosure.id)}">${escapeHtml(selectorLabelForEnclosureOption(enclosure))}</option>`)
-          .join("");
-        const savedChassisViewOptions = storageViews
-          .filter((view) => isSavedChassisView(view))
-          .map((view) => `<option value="view:${escapeHtml(view.id)}"${state.storageViewsRuntimeLoading || state.storageViewsRuntimeError ? " disabled" : ""}>${escapeHtml(selectorLabelForStorageViewOption(view))}${state.storageViewsRuntimeLoading || state.storageViewsRuntimeError ? " (previous)" : ""}</option>`)
-          .join("");
-        const virtualStorageViewOptions = storageViews
-          .filter((view) => !isSavedChassisView(view))
-          .map((view) => `<option value="view:${escapeHtml(view.id)}"${state.storageViewsRuntimeLoading || state.storageViewsRuntimeError ? " disabled" : ""}>${escapeHtml(selectorLabelForStorageViewOption(view))}${state.storageViewsRuntimeLoading || state.storageViewsRuntimeError ? " (previous)" : ""}</option>`)
-          .join("");
-        enclosureOptionsHtml = [
-          enclosureOptions ? `<optgroup label="Enclosures">${enclosureOptions}</optgroup>` : "",
-          savedChassisViewOptions ? `<optgroup label="Saved layouts">${savedChassisViewOptions}</optgroup>` : "",
-          virtualStorageViewOptions ? `<optgroup label="Other disk groups">${virtualStorageViewOptions}</optgroup>` : "",
-        ].filter(Boolean).join("");
+        enclosureOptionsHtml = orderedMainSelectorEntries(
+          visibleEnclosures,
+          storageViews,
+          Array.isArray(state.storageViewsRuntime?.view_order) ? state.storageViewsRuntime.view_order : [],
+        ).map((entry) => {
+          if (entry.kind === "view") {
+            const disabled = state.storageViewsRuntimeLoading || state.storageViewsRuntimeError;
+            return `<option value="view:${escapeHtml(entry.item.id)}"${disabled ? " disabled" : ""}>${escapeHtml(selectorLabelForStorageViewOption(entry.item))}${disabled ? " (previous)" : ""}</option>`;
+          }
+          return `<option value="enclosure:${escapeHtml(entry.item.id)}">${escapeHtml(selectorLabelForEnclosureOption(entry.item))}</option>`;
+        }).join("");
       }
       const selectedValue = state.selectedStorageViewRuntimeId
         ? `view:${state.selectedStorageViewRuntimeId}`
@@ -10280,7 +10431,29 @@
       }
       if (payload.system_id !== state.selectedSystemId) throw new Error("Storage view response did not match the selected system.");
       state.storageViewsRuntimeError = null;
+      const applyDefaultSelection = state.pendingDefaultSelection;
       applyStorageViewRuntime(payload);
+      if (applyDefaultSelection) {
+        state.pendingDefaultSelection = false;
+        const defaultSelection = String(payload.default_selection || "");
+        if (defaultSelection.startsWith("view:")) {
+          const defaultViewId = defaultSelection.slice("view:".length);
+          if (getMainUiStorageViewRuntimeOptions().some((view) => view.id === defaultViewId)) {
+            state.selectedStorageViewRuntimeId = defaultViewId;
+            state.selectedSlot = null;
+            syncLocation();
+          }
+        } else if (defaultSelection.startsWith("enclosure:")) {
+          const defaultEnclosureId = defaultSelection.slice("enclosure:".length);
+          if (defaultEnclosureId && defaultEnclosureId !== currentLiveEnclosureId()) {
+            state.selectedEnclosureId = defaultEnclosureId;
+            syncLocation();
+            await refreshSnapshot(false, "opening-view");
+            return;
+          }
+          syncLocation();
+        }
+      }
       if (!quiet) {
         setStatus(`Loaded ${Array.isArray(payload.views) ? payload.views.length : 0} storage view${Array.isArray(payload.views) && payload.views.length === 1 ? "" : "s"} for ${payload.system_label || payload.system_id || "the selected system"}.`);
       }
@@ -10480,8 +10653,16 @@
     if (writeBlockedByPolicy()) {
       return;
     }
-    const slot = getSlotById(state.selectedSlot);
-    if (!slot) return;
+    const slot = state.selectedStorageViewRuntimeId
+      ? getLiveBackedStorageViewSlot(
+          getSelectedStorageViewRuntime(),
+          getSelectedStorageViewRuntimeSlot(state.selectedSlot),
+        )
+      : getSlotById(state.selectedSlot);
+    if (!slot) {
+      reportStorageViewActionMismatch();
+      return;
+    }
     if (!slot.led_supported) {
       setStatus(slot.led_reason || `LED control is unavailable for slot ${slot.slot_label}.`, "error");
       return;
@@ -10679,8 +10860,16 @@
     if (writeBlockedByPolicy()) {
       return;
     }
-    const slot = getSlotById(state.selectedSlot);
-    if (!slot) return;
+    const slot = state.selectedStorageViewRuntimeId
+      ? getLiveBackedStorageViewSlot(
+          getSelectedStorageViewRuntime(),
+          getSelectedStorageViewRuntimeSlot(state.selectedSlot),
+        )
+      : getSlotById(state.selectedSlot);
+    if (!slot) {
+      reportStorageViewActionMismatch();
+      return;
+    }
     if (slot.mapping_supported === false) {
       setStatus(
         slot.mapping_reason
@@ -10738,8 +10927,16 @@
     if (writeBlockedByPolicy()) {
       return;
     }
-    const slot = getSlotById(state.selectedSlot);
-    if (!slot) return;
+    const slot = state.selectedStorageViewRuntimeId
+      ? getLiveBackedStorageViewSlot(
+          getSelectedStorageViewRuntime(),
+          getSelectedStorageViewRuntimeSlot(state.selectedSlot),
+        )
+      : getSlotById(state.selectedSlot);
+    if (!slot) {
+      reportStorageViewActionMismatch();
+      return;
+    }
     if (slot.mapping_supported === false) {
       setStatus(
         slot.mapping_reason
@@ -11242,6 +11439,7 @@
       };
       state.storageViewsRuntimeLoading = true;
       state.selectedStorageViewRuntimeId = "";
+      state.pendingDefaultSelection = true;
       invalidateSnapshotExportEstimateIfBasisChanged(previousEstimateBasisKey);
       resetHeatmapHistoryCache();
       resetSasFabricData();
@@ -11267,6 +11465,7 @@
         return;
       }
       if (rawValue === currentValue) return;
+      state.pendingDefaultSelection = false;
       invalidateSmartRequests();
       state.selectionEpoch = (state.selectionEpoch || 0) + 1;
       const previousEstimateBasisKey = snapshotExportEstimateBasisKey();
@@ -11540,6 +11739,11 @@
       }
     });
   }
+  if (sasFabricShowAllButton) {
+    sasFabricShowAllButton.addEventListener("click", () => {
+      clearSasFabricSelection();
+    });
+  }
   if (sasFabricRefreshButton) {
     sasFabricRefreshButton.addEventListener("click", () => {
       state.sasFabric.open = true;
@@ -11572,6 +11776,19 @@
       const nodeButton = event.target.closest("[data-sas-fabric-node]");
       if (nodeButton) {
         selectSasFabricNode(nodeButton.dataset.sasFabricNode || "");
+      }
+    });
+    sasFabricPanel.addEventListener("keydown", (event) => {
+      if (
+        event.key !== "Escape"
+        || event.defaultPrevented
+        || sasFabricEscapeClearBlocked(event)
+      ) {
+        return;
+      }
+      if (clearSasFabricSelection()) {
+        event.preventDefault();
+        event.stopPropagation();
       }
     });
   }

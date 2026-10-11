@@ -786,6 +786,7 @@ def _slot_storage_identity(slot: SlotView) -> dict[str, Any]:
         "ses_fault_requested",
         "ses_fault_sensed",
         "ses_predicted_failure",
+        "ses_swapped",
     ):
         if key in raw_status:
             values[key] = raw_status.get(key)
