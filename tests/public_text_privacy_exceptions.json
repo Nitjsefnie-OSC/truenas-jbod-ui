@@ -452,10 +452,10 @@
         "sha256:2c4bad5b735e2092c0fe4941ec6ec0cce684ba68e202180166d25e5fec72f9fe": 3
       },
       "rfc1918_ipv4": {
-        "sha256:12c01b41995df68196d0f7811b34603c9222d1e26c3448ee6dd9d001b9fdde2a": 116
+        "sha256:1863c834b4ee013a4376220cdf2e1057444270458b9a697fe56ad5c48d4facb8": 117
       },
       "sas_wwn_identifier": {
-        "sha256:6949995716f0c7c49f40c9fd71d21bd1698027c2f9a73d677380a46f08a6c407": 216
+        "sha256:4a0ac86ac9a07a86bb88093d9cf8a46b3969f579dfcc362d4a31a414d03bab95": 221
       }
     },
     "reason": "Synthetic or adversarial test literals; exact values and counts are pinned. Issue 926 adds six literal occurrences of one invented enclosure identifier for dual-path locate-light confirmation; no captured device identity is added."
@@ -466,7 +466,7 @@
         "sha256:39de09fc25e538bb2bb7ccf330b7ffbdfaf157185f2e123cf78e2ddb148909e8": 1
       },
       "sas_wwn_identifier": {
-        "sha256:e0e72b06b9446888282bb25a1705c747abc8256ce7b1afd48ce3e0b3cba35f17": 143
+        "sha256:2f52b7fc895774f26fee6e7ba3b5aa18fdce5a2a546af045f1f08972d75a57b1": 145
       }
     },
     "reason": "Synthetic or adversarial test literals; exact detector counts are pinned. Issue 926 adds four literal occurrences of one invented enclosure identifier for dual-path locate-light parsing; no captured device identity is added."
@@ -493,7 +493,7 @@
         "sha256:b839bb1e7548e77823ba8072adcd5a810b99c17f7425a704ac6e0c2ed244dcc4": 4
       },
       "sas_wwn_identifier": {
-        "sha256:fcf42bed0124b37bc713ac15d8a0a9ec63952cae6b886fb01c61651f36d35bb3": 11
+        "sha256:68a0d594305f8292125682651ec32abc19dc8cb9628b381402f3c04a2e2f1398": 14
       }
     },
     "reason": "Synthetic or adversarial test literal; exact detector counts are pinned."

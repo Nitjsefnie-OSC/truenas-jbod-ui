@@ -1981,6 +1981,31 @@ def _extract_sg_ses_enclosure_name(output: str) -> str | None:
     return candidate
 
 
+def parse_sesutil_map_enclosure_ids(output: str) -> dict[str, str | None]:
+    """Map each `sesN:` block in plain `sesutil map` output to its Enclosure ID line."""
+    observed: dict[str, str | None] = {}
+    current: str | None = None
+    for raw_line in output.splitlines():
+        stripped = raw_line.strip()
+        ses_match = re.match(r"^(ses\d+):\s*$", stripped)
+        if ses_match:
+            current = f"/dev/{ses_match.group(1)}"
+            observed.setdefault(current, None)
+            continue
+        if current is not None and stripped.startswith("Enclosure ID:") and observed[current] is None:
+            observed[current] = normalize_text(stripped.split(":", 1)[1])
+    return observed
+
+
+def parse_sg_ses_enclosure_logical_id(output: str) -> str | None:
+    """The enclosure logical identifier an `sg_ses` page reports, normalized as discovery does."""
+    for raw_line in output.splitlines():
+        common_field = _parse_sg_ses_common_field(raw_line.strip())
+        if common_field is not None and common_field[0] == "enclosure_id":
+            return common_field[1]
+    return None
+
+
 def _extract_sg_ses_device(command: str | None) -> str | None:
     if not command:
         return None
@@ -2096,7 +2121,32 @@ def _ses_enclosures_share_identity(first: SESMapEnclosure, second: SESMapEnclosu
     return bool(bay_identities(first) & bay_identities(second))
 
 
+def _tag_control_targets_with_reported_shelf(enclosure: SESMapEnclosure) -> None:
+    """Record, on each control target, the shelf ID its own SES device reported.
+
+    Only a single-device record (one parsed SES page) tags its targets, and only
+    targets on that device, so a target never takes an ID another device
+    printed when records are merged later. The locate session reads the device
+    again and acts only if it still reports this ID (#926).
+    """
+    enclosure_id = normalize_text(enclosure.enclosure_id)
+    devices = {enclosure.ses_device, *enclosure.ses_devices} - {None}
+    if not enclosure_id or len(devices) != 1:
+        return
+    (device,) = devices
+    for slot in [*enclosure.slots.values(), *enclosure.unmapped_slots]:
+        for target in slot.control_targets:
+            if (
+                isinstance(target, dict)
+                and normalize_text(target.get("ses_device")) == device
+                and not normalize_text(target.get("enclosure_id"))
+            ):
+                target["enclosure_id"] = enclosure_id
+
+
 def _merge_ses_enclosures(enclosures: list[SESMapEnclosure]) -> list[SESMapEnclosure]:
+    for enclosure in enclosures:
+        _tag_control_targets_with_reported_shelf(enclosure)
     merged: dict[str, SESMapEnclosure] = {}
     identity_enclosures: dict[str, SESMapEnclosure] = {}
     slot_evidence: dict[str, list[tuple[SESMapSlot, str | None]]] = {}
@@ -2393,7 +2443,8 @@ def _merge_control_targets(
     strict: bool = True,
 ) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
-    seen: set[tuple[Any, ...]] = set()
+    by_pair: dict[tuple[Any, ...], dict[str, Any]] = {}
+    conflicting: set[tuple[Any, ...]] = set()
     for item in base + overlay:
         if not isinstance(item, dict):
             continue
@@ -2404,9 +2455,22 @@ def _merge_control_targets(
             ses_element_id if not strict or isinstance(ses_element_id, int) else None
         )
         pair = (ssh_host, ses_device, normalized_element_id)
-        if (strict and (not pair[1] or pair[2] is None)) or pair in seen:
+        if strict and (not pair[1] or pair[2] is None):
             continue
-        seen.add(pair)
+        # The shelf the device reported when this target was discovered. The
+        # locate session reads the device again and acts only if it still
+        # reports this shelf (#926).
+        enclosure_id = normalize_text(item.get("enclosure_id"))
+        existing = by_pair.get(pair)
+        if existing is not None:
+            if enclosure_id and pair not in conflicting:
+                if existing.get("enclosure_id") is None:
+                    existing["enclosure_id"] = enclosure_id
+                elif existing["enclosure_id"] != enclosure_id:
+                    # One device element seen with two shelves: trust neither.
+                    existing.pop("enclosure_id", None)
+                    conflicting.add(pair)
+            continue
         payload = {
             "ses_device": pair[1],
             "ses_element_id": pair[2],
@@ -2416,6 +2480,9 @@ def _merge_control_targets(
         }
         if pair[0]:
             payload["ssh_host"] = pair[0]
+        if enclosure_id:
+            payload["enclosure_id"] = enclosure_id
+        by_pair[pair] = payload
         merged.append(payload)
     return merged
 

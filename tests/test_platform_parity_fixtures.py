@@ -451,7 +451,10 @@ class PlatformParityFixtureTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(candidate["ses_slot_number"], bay + 1)
                     self.assertEqual(
                         candidate["ses_targets"],
-                        [{"ses_device": "/dev/sg9", "ses_element_id": bay, "ses_slot_number": bay + 1}],
+                        [{
+                            "ses_device": "/dev/sg9", "ses_element_id": bay, "ses_slot_number": bay + 1,
+                            "enclosure_id": "5eeeeeee00001b45",
+                        }],
                     )
                 empty = candidates[2]
                 self.assertFalse(
@@ -461,7 +464,10 @@ class PlatformParityFixtureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(empty.get("device_names"))
                 self.assertEqual(
                     empty["ses_targets"],
-                    [{"ses_device": "/dev/sg9", "ses_element_id": 2, "ses_slot_number": 3}],
+                    [{
+                        "ses_device": "/dev/sg9", "ses_element_id": 2, "ses_slot_number": 3,
+                        "enclosure_id": "5eeeeeee00001b45",
+                    }],
                 )
                 self.assertEqual(parsed.ses_slot_to_device, expected_devices)
                 self.assertEqual(
@@ -545,6 +551,8 @@ class PlatformParityFixtureTests(unittest.IsolatedAsyncioTestCase):
                         "ses_device": "/dev/sg9",
                         "ses_element_id": bay,
                         "ses_slot_number": control_slot,
+                        # The shelf the fixture's AES page reports (#926).
+                        "enclosure_id": "5eeeeeee00001b45",
                     }
                 ]
                 for bay, control_slot in {0: 1, 1: 2, 2: None, 3: 4}.items()

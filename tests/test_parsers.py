@@ -1021,9 +1021,10 @@ Enclosure status diagnostic page:
         self.assertEqual(enclosure.slots[1].status, "OK")
         self.assertTrue(enclosure.slots[1].present)
         self.assertTrue(enclosure.slots[1].identify_active)
+        # Each control target keeps the shelf its own SES device reported (#926).
         self.assertEqual(
             enclosure.slots[1].control_targets,
-            [{"ses_device": "/dev/sg7", "ses_element_id": 0, "ses_slot_number": 1}],
+            [{"ses_device": "/dev/sg7", "ses_element_id": 0, "ses_slot_number": 1, "enclosure_id": "5000000000000101"}],
         )
         self.assertEqual(enclosure.slots[2].element_id, 1)
         self.assertEqual(enclosure.slots[2].status, "Not installed")
@@ -2284,6 +2285,7 @@ Slot 01  da0  Example Disk  SYNTH0001  OK
                     "ses_device": "/dev/ses2",
                     "ses_element_id": 2,
                     "ses_slot_number": 1,
+                    "enclosure_id": "5000000000000101",
                 }
             ],
         )

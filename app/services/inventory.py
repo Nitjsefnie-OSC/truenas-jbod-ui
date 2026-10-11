@@ -121,6 +121,8 @@ from app.services.parsers import (
     parse_nvme_id_ns_summary,
     parse_nvme_smart_log_summary,
     parse_sesutil_map,
+    parse_sesutil_map_enclosure_ids,
+    parse_sg_ses_enclosure_logical_id,
     parse_sg_ses_enclosure_status,
     parse_smart_test_results,
     parse_smartctl_text_enrichment,
@@ -306,6 +308,10 @@ class LedSessionBusyError(TrueNASAPIError):
     """Every locate-light SSH slot for the host is in use; the press may be retried."""
 
     retryable = True
+
+
+class LedTargetMovedError(TrueNASAPIError):
+    """The remembered SES device now reports a different shelf, so no locate command ran."""
 
 
 @dataclass(slots=True)
@@ -1330,8 +1336,7 @@ class InventoryService:
         self._esxi_storcli_swapped = False
         self._snapshot_refresh_tasks: dict[str, asyncio.Task[None]] = {}
         self._source_bundle_refresh_task: asyncio.Task[InventorySourceBundle | None] | None = None
-        # Source generation the background source refresh started under. A
-        # task from before an invalidation can only end as stale.
+        # Source generation the shared background source task started under.
         self._source_bundle_refresh_generation = -1
         self._smart_refresh_tasks: dict[SmartCacheKey, asyncio.Task[None]] = {}
         self._scale_preferred_ses_host: str | None = None
@@ -3699,16 +3704,9 @@ class InventoryService:
 
     def _schedule_background_source_bundle_refresh(self) -> asyncio.Task[InventorySourceBundle | None]:
         existing = self._source_bundle_refresh_task
-        if (
-            existing is not None
-            and not existing.done()
-            and self._source_bundle_refresh_generation == self._source_bundle_generation
-        ):
+        if existing is not None and not existing.done():
             return existing
-        # Either nothing is running, or the running read began before the
-        # sources were invalidated (for example by a second locate press) and
-        # will be rejected as stale. Start a fresh read; the source lock
-        # serializes it behind the stale one.
+
         task = asyncio.create_task(self._background_source_bundle_refresh())
         self._source_bundle_refresh_task = task
         self._source_bundle_refresh_generation = self._source_bundle_generation
@@ -4536,7 +4534,16 @@ class InventoryService:
     async def _background_snapshot_refresh(self, cache_key: str, *, default_selection: bool = False) -> None:
         try:
             observed_snapshot_publication = self._snapshot_published_sequence.get(cache_key, -1)
-            source_bundle = await _await_retained(self._schedule_background_source_bundle_refresh())
+            source_task = self._schedule_background_source_bundle_refresh()
+            # A shared source task that began before the invalidation which
+            # scheduled this refresh (for example an earlier locate press) can
+            # only end as stale. Retry once on the next shared task instead of
+            # starting a task per press. A read that began after the
+            # invalidation and still failed is a real failure: no retry.
+            joined_stale_read = self._source_bundle_refresh_generation < self._source_bundle_generation
+            source_bundle = await _await_retained(source_task)
+            if source_bundle is None and joined_stale_read:
+                source_bundle = await _await_retained(self._schedule_background_source_bundle_refresh())
             if source_bundle is None:
                 return
             minimum_source_publication = source_bundle.publication
@@ -5028,6 +5035,12 @@ class InventoryService:
         invalidate_snapshot: bool = True,
     ) -> dict[str, Any]:
         slot_view = self._resolve_led_slot(slot, selected_enclosure_id)
+        if slot_view is not None and self._led_target_shelf_unrecorded(slot_view):
+            # The shelf check in the locate session needs the shelf ID the
+            # device reported at discovery. Without one, a remembered target
+            # cannot be checked, so read the current snapshot first (#926).
+            snapshot = await self.get_snapshot(selected_enclosure_id=selected_enclosure_id)
+            slot_view = next((item for item in snapshot.slots if item.slot == slot), None)
         if not slot_view:
             raise TrueNASAPIError(f"Slot {slot:02d} is not present in the current snapshot.")
         if not slot_view.led_supported or not slot_view.led_backend:
@@ -5063,7 +5076,15 @@ class InventoryService:
                     action=action, exit_status=0, started=started,
                 )
         elif slot_view.led_backend in {"ssh", "scale_sg_ses", "quantastor_sg_ses"}:
-            confirmation = await self._set_slot_led_over_ssh(slot_view, action)
+            try:
+                confirmation = await self._set_slot_led_over_ssh(slot_view, action)
+            except LedTargetMovedError:
+                # The remembered device now answers for another shelf. Drop the
+                # target and reread this enclosure so the next press uses the
+                # current topology.
+                self._forget_led_target(slot, selected_enclosure_id)
+                self.schedule_led_snapshot_refresh(enclosure_id=selected_enclosure_id)
+                raise
         elif slot_view.led_backend == "unifi_fault":
             confirmation = await self._set_unifi_slot_led_over_ssh(slot_view, action)
         elif slot_view.led_backend == "supermicro_bmc":
@@ -14183,6 +14204,11 @@ class InventoryService:
             }
             if target_host:
                 target_payload["ssh_host"] = target_host
+            # Keep the shelf the device reported at discovery for the locate
+            # session's shelf check (#926).
+            target_shelf = normalize_text(item.get("enclosure_id"))
+            if target_shelf:
+                target_payload["enclosure_id"] = target_shelf
             ses_targets.append(target_payload)
         raw_control_slot = raw_slot_status.get("ses_slot_number")
         if (
@@ -14531,10 +14557,30 @@ class InventoryService:
         # Read all SES paths in one plain map immediately after the action. Do
         # not use `map -u`: per-path observations are needed for dual-path bays.
         readback_command = "sudo -n /usr/sbin/sesutil map"
+        expected_shelf = normalize_text(action_target.get("enclosure_id"))
+
+        def shelf_check(results: list[SSHCommandResult]) -> list[str]:
+            # The same plain map, read first in this session: the locate runs
+            # only if the device still reports the shelf it was found on.
+            preflight = results[0]
+            if not preflight.ok:
+                raise TrueNASAPIError(
+                    "Could not confirm which shelf this bay's enclosure device belongs to: "
+                    + self._led_command_failure_detail(preflight)
+                )
+            reported = parse_sesutil_map_enclosure_ids(preflight.stdout)
+            # The device must still be listed and report the shelf it was found
+            # on (or, for a shelf with no ID, still report none).
+            if target_device not in reported or reported[target_device] != expected_shelf:
+                raise self._led_target_moved(slot_view)
+            return [action_command, readback_command]
+
         results = await self._run_led_ssh_sequence(
             target_host,
-            [action_command, readback_command],
+            [readback_command],
+            then=shelf_check,
         )
+        results = results[1:]
         action_result, action_duration = results[0]
         self._log_led_action_result(
             slot_view,
@@ -14552,6 +14598,9 @@ class InventoryService:
         readback_result = results[1]
         parsed = parse_sesutil_map(readback_result[0].stdout) if readback_result[0].ok else []
         enclosure_by_device = {item.ses_device: item for item in parsed}
+        reported_shelves = (
+            parse_sesutil_map_enclosure_ids(readback_result[0].stdout) if readback_result[0].ok else {}
+        )
         paths: list[dict[str, Any]] = []
         for target in readback_targets:
             device = normalize_text(target.get("ses_device"))
@@ -14560,7 +14609,8 @@ class InventoryService:
                 continue
             enclosure = enclosure_by_device.get(device)
             observed = None
-            if enclosure is not None:
+            # A path counts only while its device reports the target's shelf.
+            if enclosure is not None and reported_shelves.get(device) == normalize_text(target.get("enclosure_id")):
                 mapped_slot = next(
                     (
                         candidate
@@ -14600,7 +14650,14 @@ class InventoryService:
         failures: list[str] = []
         paths: list[dict[str, Any]] = []
         sg_action = "--set=ident" if requested_active else "--clear=ident"
+        acted_on_another_path = False
         for target_host, host_targets in by_host.items():
+            # Discovery only maps a device whose AES page it read, so the same
+            # page, read first in this session, says which shelf it is now.
+            preflight_commands = [
+                shlex.join(["sudo", "-n", "/usr/bin/sg_ses", "-p", "aes", normalize_text(target.get("ses_device")) or ""])
+                for target in host_targets
+            ]
             commands: list[str] = []
             for target in host_targets:
                 target_device = normalize_text(target.get("ses_device"))
@@ -14618,7 +14675,36 @@ class InventoryService:
                         shlex.join(["sudo", "-n", "/usr/bin/sg_ses", "-p", "ec", target_device]),
                     ]
                 )
-            results = await self._run_led_ssh_sequence(target_host, commands)
+
+            def shelf_check(
+                results: list[SSHCommandResult],
+                *,
+                host_targets: list[dict[str, Any]] = host_targets,
+                commands: list[str] = commands,
+            ) -> list[str]:
+                for target, preflight in zip(host_targets, results, strict=True):
+                    if not preflight.ok:
+                        raise TrueNASAPIError(
+                            "Could not confirm which shelf this bay's enclosure device belongs to: "
+                            + self._led_command_failure_detail(preflight)
+                        )
+                    if parse_sg_ses_enclosure_logical_id(preflight.stdout) != normalize_text(target.get("enclosure_id")):
+                        raise self._led_target_moved(slot_view)
+                return commands
+
+            try:
+                results = await self._run_led_ssh_sequence(target_host, preflight_commands, then=shelf_check)
+            except LedTargetMovedError as exc:
+                if not acted_on_another_path:
+                    raise
+                # An earlier path to this bay passed its own check and was
+                # switched; only this path was refused.
+                raise LedTargetMovedError(
+                    f"Bay {slot_view.slot_label}'s light was switched through one enclosure path, but another "
+                    "path no longer reports the same shelf and was left alone. Refresh the page to check it."
+                ) from exc
+            acted_on_another_path = True
+            results = results[len(preflight_commands):]
             for index, target in enumerate(host_targets):
                 action_result, action_duration = results[index * 2]
                 readback_result, _readback_duration = results[index * 2 + 1]
@@ -14640,6 +14726,12 @@ class InventoryService:
                     )
                     continue
                 observed = None
+                readback_shelf = (
+                    parse_sg_ses_enclosure_logical_id(readback_result.stdout) if readback_result.ok else None
+                )
+                if readback_result.ok and readback_shelf not in {None, normalize_text(target.get("enclosure_id"))}:
+                    # The readback page names another shelf: it says nothing about this bay.
+                    readback_result = SSHCommandResult(command=readback_result.command, ok=False, exit_code=1)
                 if readback_result.ok:
                     enclosure = parse_sg_ses_enclosure_status(
                         readback_result.stdout,
@@ -14697,19 +14789,32 @@ class InventoryService:
         self,
         target_host: str | None,
         commands: list[str],
+        *,
+        then: Callable[[list[SSHCommandResult]], list[str]] | None = None,
     ) -> list[tuple[SSHCommandResult, float]]:
+        """Run locate commands over one short session of their own.
+
+        ``then`` sees the first commands' results and returns the next
+        commands for the same session, or raises to stop before them. The
+        locate actions use it to check the shelf before switching a light.
+        """
         if not self._ssh_destination_authority_approved(target_host):
-            return [
-                (result, 0.0)
-                for result in self._ssh_authority_failure_results(commands)
-            ]
+            failures = [(result, 0.0) for result in self._ssh_authority_failure_results(commands)]
+            if then is not None:
+                then([result for result, _duration in failures])
+            return failures
         probe: Any = self._ssh_probe_for_host(normalize_text(target_host))
         if not isinstance(probe, SSHProbe):
             fallback_results: list[tuple[SSHCommandResult, float]] = []
-            for command in commands:
-                started = time.perf_counter()
-                result = await self._run_ssh_command(command, target_host)
-                fallback_results.append((result, max(0.0, time.perf_counter() - started)))
+            pending = list(commands)
+            while pending:
+                for command in pending:
+                    started = time.perf_counter()
+                    result = await self._run_ssh_command(command, target_host)
+                    fallback_results.append((result, max(0.0, time.perf_counter() - started)))
+                if then is None:
+                    break
+                pending, then = then([result for result, _duration in fallback_results]), None
             return fallback_results
 
         # This session deliberately bypasses the shared optional-SSH session
@@ -14726,15 +14831,40 @@ class InventoryService:
             session = probe.open_session()
             results: list[tuple[SSHCommandResult, float]] = []
             try:
-                for command in commands:
-                    started = time.perf_counter()
-                    result = await session.run_command_owned(command)
-                    results.append((result, max(0.0, time.perf_counter() - started)))
+                pending = list(commands)
+                while pending:
+                    for command in pending:
+                        started = time.perf_counter()
+                        result = await session.run_command_owned(command)
+                        results.append((result, max(0.0, time.perf_counter() - started)))
+                    if then is None:
+                        break
+                    pending, then = then([result for result, _duration in results]), None
             finally:
                 await session.close_owned()
         finally:
             admission.release()
         return results
+
+    @staticmethod
+    def _led_target_shelf_unrecorded(slot_view: SlotView) -> bool:
+        if slot_view.led_backend not in {"ssh", "scale_sg_ses", "quantastor_sg_ses"}:
+            return False
+        targets = [target for target in (slot_view.ssh_ses_targets or []) if isinstance(target, dict)]
+        if not targets:
+            return True
+        return any(not normalize_text(target.get("enclosure_id")) for target in targets)
+
+    @staticmethod
+    def _led_target_moved(slot_view: SlotView) -> LedTargetMovedError:
+        return LedTargetMovedError(
+            f"The enclosure device for bay {slot_view.slot_label} no longer reports the shelf it was "
+            "found on, so its light was not switched. Refresh the page and try again."
+        )
+
+    def _forget_led_target(self, slot: int, selected_enclosure_id: str | None) -> None:
+        request_scope = selected_enclosure_id or SNAPSHOT_NO_ENCLOSURE_KEY
+        self._led_slot_targets.pop((request_scope, slot), None)
 
     def _led_ssh_semaphore_for_host(self, host: str | None) -> asyncio.Semaphore:
         key = self._optional_ssh_backoff_key(host)

@@ -10737,13 +10737,22 @@
         ? snapshotReuseCacheKey(mutation.systemId, retainedSnapshot.selected_enclosure_id || null)
         : null;
       // finishMutationContext() clears this system's reuse cache, so read the
-      // entry first and re-store only if the retained copy is not older.
+      // entries first and re-store only if the retained copy is not older.
+      // The system selector reopens the automatic entry (system::__auto__),
+      // so restore it too when it held this same shelf.
+      const autoKey = retainedSnapshot ? snapshotReuseCacheKey(mutation.systemId, null) : null;
       const cachedBeforeFinish = retainedKey ? state.snapshotReuseCache?.[retainedKey] : null;
+      const autoBeforeFinish = autoKey && autoKey !== retainedKey ? state.snapshotReuseCache?.[autoKey] : null;
       finishMutationContext(mutation, succeeded);
       if (retainedSnapshot && !(cachedBeforeFinish
         && snapshotUpdatedMs(cachedBeforeFinish) > snapshotUpdatedMs(retainedSnapshot))) {
         state.snapshotReuseCache ||= {};
         state.snapshotReuseCache[retainedKey] = retainedSnapshot;
+        if (autoBeforeFinish
+          && (autoBeforeFinish.selected_enclosure_id || null) === (retainedSnapshot.selected_enclosure_id || null)
+          && snapshotUpdatedMs(autoBeforeFinish) <= snapshotUpdatedMs(retainedSnapshot)) {
+          state.snapshotReuseCache[autoKey] = cloneJsonValue(retainedSnapshot);
+        }
       }
     }
   }
