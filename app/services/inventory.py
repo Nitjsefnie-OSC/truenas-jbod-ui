@@ -4977,9 +4977,23 @@ class InventoryService:
             or self._canonical_default_enclosure_id
             or SNAPSHOT_NO_ENCLOSURE_KEY
         )
+        default_selection = enclosure_id is None
+        cancelling = self._snapshot_refresh_tasks.get(cache_key)
+        if cancelling is not None and not cancelling.done() and cancelling.cancelling():
+            # The invalidation above cancelled an earlier press's refresh. It
+            # stays registered, and the key stays marked invalid, until the
+            # task unwinds and its cleanup runs. Scheduling now would see that
+            # task and do nothing; schedule the replacement after the cleanup.
+            cancelling.add_done_callback(
+                lambda _done: self._schedule_background_snapshot_refresh(
+                    cache_key,
+                    default_selection=default_selection,
+                )
+            )
+            return
         self._schedule_background_snapshot_refresh(
             cache_key,
-            default_selection=enclosure_id is None,
+            default_selection=default_selection,
         )
 
     def disk_inventory_sync_unavailable_reason(self, mode: DiskInventorySyncMode) -> str | None:

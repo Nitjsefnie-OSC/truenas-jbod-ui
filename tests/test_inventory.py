@@ -18305,6 +18305,45 @@ ses1:
         )
         return service
 
+    async def test_second_locate_replaces_the_refresh_it_cancels(self) -> None:
+        # A second press while the first press's refresh still runs cancels
+        # that refresh; a replacement must be scheduled, not skipped because
+        # the cancelled task has not finished unwinding yet.
+        service = self.led_service("core", SlotView(slot=0, slot_label="00", row_index=0, column_index=0))
+        invalidated_at_start: list[bool] = []
+        finished = 0
+
+        async def background_refresh(cache_key: str, *, default_selection: bool = False) -> None:
+            nonlocal finished
+            # A refresh that starts with its key still marked invalid fails
+            # as busy, so the replacement must start after cleanup.
+            invalidated_at_start.append(cache_key in service._snapshot_invalidated)
+            if len(invalidated_at_start) == 1:
+                await asyncio.sleep(3600)
+            finished += 1
+
+        service._background_snapshot_refresh = background_refresh
+
+        service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+        first = service._snapshot_refresh_tasks["shelf-a"]
+        await asyncio.sleep(0)
+        self.assertEqual(len(invalidated_at_start), 1)
+
+        service.schedule_led_snapshot_refresh(enclosure_id="shelf-a")
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(first, timeout=0.5)
+        await asyncio.sleep(0)
+        second = service._snapshot_refresh_tasks.get("shelf-a")
+        self.assertIsNotNone(second, "the cancelled refresh was not replaced")
+        self.assertIsNot(second, first)
+        await asyncio.wait_for(second, timeout=0.5)
+        await asyncio.sleep(0)
+
+        self.assertEqual(invalidated_at_start, [False, False])
+        self.assertEqual(finished, 1)
+        self.assertNotIn("shelf-a", service._snapshot_refresh_tasks)
+        self.assertNotIn("shelf-a", service._snapshot_invalidated)
+
     async def test_led_sequence_uses_one_owned_session_without_the_inventory_lock(self) -> None:
         service = self.led_service(
             "core",
