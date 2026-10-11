@@ -1455,6 +1455,87 @@ ses0:
 
         self.assertEqual(slot.device_names, ["da5", "da29"])
 
+    def test_parse_sesutil_map_reads_flags_from_status_bytes(self) -> None:
+        # sesutil prints each element's four SES status bytes after the status
+        # name. Byte 0 holds PRDFAIL/DISABLED/SWAP above the status code; byte 2
+        # holds DO NOT REMOVE and byte 3 FAULT SENSED/FAULT REQSTD (SES-3 tables
+        # 72 and 80). Byte 1 is HOT SPARE only in an Array Device Slot (table
+        # 83); in a Device Slot it is the slot address.
+        output = """
+ses0:
+  Enclosure Name: ExampleCo FlagShelf
+  Enclosure ID: 5000000000000007
+  Element 1, Type: Array Device Slot
+    Status: OK (0x11 0x00 0x00 0x00)
+    Description: Slot00
+    Device Names: da0, pass0
+  Element 2, Type: Array Device Slot
+    Status: Critical (0x72 0x20 0x40 0x60)
+    Description: Slot01
+    Device Names: da1, pass1
+  Element 3, Type: Array Device Slot
+    Status: Not Installed (0x05 0x00 0x02 0x00)
+    Description: Slot02
+    Extra status:
+      - LED=locate
+  Element 4, Type: Device Slot
+    Status: OK (0x01 0x20 0x00 0x00)
+    Description: Slot03
+    Device Names: da3, pass3
+  Element 5, Type: Array Device Slot
+    Status: OK
+    Description: Slot04
+    Device Names: da4, pass4
+""".strip()
+
+        parsed = parse_sesutil_map(output)
+        slots = parsed[0].slots
+        flags = ("predicted_failure", "disabled", "swapped", "hot_spare", "do_not_remove", "fault_sensed", "fault_requested")
+
+        def values(slot: SESMapSlot) -> dict[str, bool | None]:
+            return {name: getattr(slot, name) for name in flags}
+
+        self.assertEqual(values(slots[0]), {**dict.fromkeys(flags, False), "swapped": True})
+        self.assertEqual(values(slots[1]), dict.fromkeys(flags, True))
+        self.assertEqual(values(slots[2]), dict.fromkeys(flags, False))
+        self.assertTrue(slots[2].identify_active)
+        self.assertFalse(slots[2].present)
+        self.assertEqual(values(slots[3]), {**dict.fromkeys(flags, False), "hot_spare": None})
+        # No status bytes printed: the flags stay unknown, not false.
+        self.assertEqual(values(slots[4]), dict.fromkeys(flags, None))
+
+        padded = SESMapSlot(slot_number=0)
+        parsers._apply_ses_status_bytes(padded, "OK" + " " * 65536 + "(0x11 0x00 0x00 0x00)", "Array Device Slot")
+        self.assertIs(padded.swapped, True)
+
+        candidates, _ = build_slot_candidates_from_ses_enclosures(parsed, 5, None)
+        self.assertIs(candidates[0]["ses_swapped"], True)
+        self.assertIs(candidates[1]["ses_predicted_failure"], True)
+        self.assertIs(candidates[2]["ses_swapped"], False)
+        self.assertIsNone(candidates[4]["ses_swapped"])
+
+    def test_parse_sesutil_map_duplicate_slot_keeps_either_paths_swap_flag(self) -> None:
+        # A standalone enclosure keeps one SWAP bit per I_T nexus (SES-3
+        # 7.3.2), so the two paths to one bay can disagree.
+        output = """
+ses0:
+  Enclosure Name: ExampleCo DualPathShelf
+  Enclosure ID: 5000000000000005
+  Element 5, Type: Array Device Slot
+    Status: OK (0x01 0x00 0x00 0x00)
+    Description: Slot05
+    Device Names: da5, pass5
+  Element 29, Type: Array Device Slot
+    Status: OK (0x11 0x00 0x00 0x00)
+    Description: Slot05
+    Device Names: da29, pass29
+""".strip()
+
+        slot = parse_sesutil_map(output)[0].slots[5]
+
+        self.assertIs(slot.swapped, True)
+        self.assertIs(slot.predicted_failure, False)
+
     def test_repeated_device_name_records_keep_bounded_incremental_state(self) -> None:
         records = "\n".join(
             f"""  Element {element}, Type: Array Device Slot
@@ -2060,6 +2141,31 @@ Enclosure status diagnostic page:
         self.assertEqual(parsed.slots[0].slot_number_source, "ses_element_id_fallback")
         self.assertEqual(parsed.slots[1].identify_active, False)
         self.assertFalse(parsed.slots[1].present)
+
+    def test_parse_sg_ses_enclosure_status_reads_swap_flag(self) -> None:
+        output = """
+  ExampleCo  FlagShelf  0001
+  Primary enclosure logical identifier (hex): 5000000000000007
+Enclosure status diagnostic page:
+  INVOP=0, INFO=0, NON-CRIT=0, CRIT=0, UNRECOV=0
+  generation code: 0x1
+  status descriptor list
+    Element type: Array device slot, subenclosure id: 0 [ti=0]
+      Overall descriptor:
+      Element 0 descriptor:
+        Predicted failure=0, Disabled=0, Swap=1, status: OK
+        Slot address: 0
+      Element 1 descriptor:
+        Predicted failure=0, Disabled=0, Swap=0, status: OK
+        Slot address: 1
+""".strip()
+
+        parsed = parse_sg_ses_enclosure_status(output, "sg_ses ec /dev/sg9")
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertIs(parsed.slots[0].swapped, True)
+        self.assertIs(parsed.slots[1].swapped, False)
 
     def test_parse_sesutil_show_assigns_24_bay_profile_metadata(self) -> None:
         output = """

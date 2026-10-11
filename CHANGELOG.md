@@ -35,6 +35,18 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   QuantaStor Primary Chassis on the pool owner. A saved chassis backed by a
   different enclosure stays read-only instead of borrowing that enclosure's
   mapping or locate-light controls. (#933)
+
+### Changed
+
+- Bay Health now shows plain words instead of raw enclosure bytes: "Empty
+  bay" for `Not Installed (0x05 ...)`, and "OK, reseated or replaced" when the
+  enclosure's swap flag is set. Hovering the Health value shows the raw
+  status. The SES Flags row now shows on every platform. On TrueNAS CORE the
+  predicted-failure, disabled, swap, do-not-remove and fault flags come from
+  the status bytes `sesutil map` already prints. NAK received, ACK/NAK
+  timeout, initiator response timeout and iuCRC errors in the Storage Fabric
+  diagnostics now say what the standard means by each code and what the code
+  cannot tell you. (#939)
 ### Fixed
 
 - Selecting a bay, or a path in the Connections panel, no longer removes the

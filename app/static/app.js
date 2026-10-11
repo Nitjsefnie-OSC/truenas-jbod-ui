@@ -33,6 +33,8 @@
   const heatmapSampleCache = new WeakMap();
   const ANNUALIZED_MIN_POWER_ON_HOURS = 24 * 30;
   const HISTORY_UI_STORAGE_KEY = "truenas-jbod-ui.history-ui.v1";
+  const SES_SWAP_TITLE =
+    "Reseated or replaced: the enclosure saw a disk removed and inserted in this bay since its swap flag was last cleared. It does not record when.";
   const EXPORT_UI_STORAGE_KEY = "truenas-jbod-ui.export-ui.v1";
   const snapshotMode = Boolean(bootstrap.snapshotMode);
   const preloadedSasFabric = snapshotMode ? (bootstrap.preloadedSasFabric || null) : null;
@@ -4487,6 +4489,48 @@
     return host || "n/a";
   }
 
+  // The enclosure reports a bay as a status name and its four SES status bytes,
+  // such as "OK (0x11 0x00 0x00 0x00)". Byte 0 holds the status code in its low
+  // four bits and the predicted-failure (0x40), disabled (0x20) and swap (0x10)
+  // flags above it (SES-3 table 72). Other health text passes through. The text
+  // comes from the appliance and runs on every grid render, so the byte suffix
+  // is found by position and only that short tail is matched, and the shown
+  // value is capped.
+  function formatSlotHealth(value) {
+    if (value === null || value === undefined) {
+      return value;
+    }
+    const text = String(value).trim();
+    const open = text.endsWith(")") ? text.lastIndexOf("(") : -1;
+    const bytes = open >= 0 && text.length - open <= 40
+      ? text.slice(open).match(/^\((0x[0-9a-f]{2})\s+0x[0-9a-f]{2}\s+0x[0-9a-f]{2}\s+0x[0-9a-f]{2}\)$/i)
+      : null;
+    let shown = text;
+    if (bytes) {
+      const common = Number.parseInt(bytes[1], 16);
+      if ((common & 0x0f) === 0x05) {
+        return "Empty bay";
+      }
+      const parts = [text.slice(0, open).trim() || "Unknown"];
+      if (common & 0x40) parts.push("predicted failure");
+      if (common & 0x20) parts.push("disabled");
+      if (common & 0x10) parts.push("reseated or replaced");
+      shown = parts.join(", ");
+    }
+    return shown.length > 160 ? `${shown.slice(0, 159)}\u2026` : shown;
+  }
+
+  function slotHealthTitle(value) {
+    const text = value === null || value === undefined ? "" : String(value).trim();
+    const open = text.endsWith(")") ? text.lastIndexOf("(") : -1;
+    if (open < 0 || text.length - open > 40 || !/^\(0x[0-9a-f]{2}(?:\s+0x[0-9a-f]{2}){3}\)$/i.test(text.slice(open))) {
+      return "";
+    }
+    const name = text.slice(0, open).trim();
+    const shownName = name.length > 120 ? `${name.slice(0, 119)}\u2026` : name;
+    return `Enclosure status: ${shownName ? `${shownName} ` : ""}${text.slice(open)}`;
+  }
+
   function formatSesStateValue(slot) {
     const flags = [];
     if (slot?.raw_status?.ses_hot_spare) {
@@ -4506,6 +4550,9 @@
     }
     if (slot?.raw_status?.ses_disabled) {
       flags.push("Disabled");
+    }
+    if (slot?.raw_status?.ses_swapped) {
+      flags.push("Reseated or replaced");
     }
     return flags.length ? flags.join(", ") : "n/a";
   }
@@ -6120,7 +6167,7 @@
       slot.serial ? `Serial: ${slot.serial}` : "Serial: n/a",
       persistentIdText,
       slot.pool_name ? `Pool: ${slot.pool_name}` : "Pool: n/a",
-      slot.health ? `Health: ${slot.health}` : null,
+      slot.health ? `Health: ${formatSlotHealth(slot.health)}` : null,
       slot.target_system_label ? `Target: ${slot.target_system_label}` : null,
       slot.placement_key ? `Placement: ${slot.placement_key}` : null,
       getLiveBackedStorageViewSlot(selectedView, slot)?.identify_active ? "Locate light on" : null,
@@ -6159,7 +6206,7 @@
       persistentIdText,
       slot.pool_name ? `${poolLabel}: ${slot.pool_name}` : `${poolLabel}: n/a`,
       slot.vdev_name ? `${vdevLabel}: ${slot.vdev_name}` : `${vdevLabel}: n/a`,
-      slot.health ? `Health: ${slot.health}` : "Health: n/a",
+      slot.health ? `Health: ${formatSlotHealth(slot.health)}` : "Health: n/a",
     ];
     if (slot.identify_active) {
       lines.push("Locate light on");
@@ -6172,10 +6219,10 @@
       if (sesHost !== "n/a") {
         lines.push(`SES Host: ${sesHost}`);
       }
-      const sesState = formatSesStateValue(slot);
-      if (sesState !== "n/a") {
-        lines.push(`SES Flags: ${sesState}`);
-      }
+    }
+    const sesState = formatSesStateValue(slot);
+    if (sesState !== "n/a") {
+      lines.push(`SES Flags: ${sesState}`);
     }
 
     return appendHeatmapTooltipLines(lines, slot.slot);
@@ -6191,7 +6238,7 @@
     if (slot.pool_name) {
       parts.push(`${currentPlatform() === "linux" ? "mount" : "pool"} ${slot.pool_name}`);
     }
-    parts.push(slot.health ? String(slot.health).toLowerCase() : stateLabel(slot).toLowerCase());
+    parts.push(slot.health ? formatSlotHealth(slot.health).toLowerCase() : stateLabel(slot).toLowerCase());
     if (slot.identify_active) {
       parts.push("Locate light on");
     }
@@ -6922,24 +6969,25 @@
     finishGridRender();
   }
 
-  function kvRow(label, value, copyable = false) {
+  function kvRow(label, value, copyable = false, title = "") {
     const hasValue = value !== null && value !== undefined && value !== "";
     const safeValue = escapeHtml(hasValue ? String(value) : "n/a");
     const encodedValue = hasValue ? encodeURIComponent(String(value)) : "";
+    const titleAttribute = title ? ` title="${escapeHtml(title)}"` : "";
     return `
       <div class="kv-row">
         <div class="kv-label">${escapeHtml(label)}</div>
-        <div class="kv-value">${safeValue}</div>
+        <div class="kv-value"${titleAttribute}>${safeValue}</div>
         <div>${copyable && hasValue ? `<button class="copy-button" data-copy="${encodedValue}">Copy</button>` : ""}</div>
       </div>
     `;
   }
 
-  function kvRowIfMeaningful(label, value, copyable = false) {
+  function kvRowIfMeaningful(label, value, copyable = false, title = "") {
     if (value === null || value === undefined || value === "" || value === "n/a") {
       return "";
     }
-    return kvRow(label, value, copyable);
+    return kvRow(label, value, copyable, title);
   }
 
   function isEmptyBay(slot) {
@@ -8914,7 +8962,7 @@
         showQuantastorContext ? kvRowIfMeaningful("I/O Fence On", formatQuantastorContextValue(slot, "fence_owner_label")) : "",
         showQuantastorContext ? kvRowIfMeaningful("Visible On", formatVisibleOnValue(slot)) : "",
         showQuantastorContext ? kvRowIfMeaningful("SES Host", formatSesHostValue(slot)) : "",
-        kvRow(state.snapshotMode ? "Health at capture" : "Health", slot.health),
+        kvRow(state.snapshotMode ? "Health at capture" : "Health", formatSlotHealth(slot.health), false, slotHealthTitle(slot.health)),
         kvRowIfMeaningful("Temp", formatTemperatureValue(slot, smartEntry)),
         kvRowIfMeaningful(
           state.snapshotMode ? "SMART Status at capture" : "SMART Status",
@@ -8961,7 +9009,7 @@
           showSasTransportFields ? kvRowIfMeaningful("SAS Address", formatSasAddressValue(slot, smartEntry)) : "",
           showSasTransportFields ? kvRowIfMeaningful("Attached SAS", formatAttachedSasAddressValue(slot, smartEntry)) : "",
           showLinkRate ? kvRowIfMeaningful("Link Rate", formatLinkRateValue(smartEntry)) : "",
-          showQuantastorContext ? kvRowIfMeaningful("SES Flags", formatSesStateValue(slot)) : "",
+          kvRowIfMeaningful("SES Flags", formatSesStateValue(slot), false, slot?.raw_status?.ses_swapped ? SES_SWAP_TITLE : ""),
         ]),
       ].filter(Boolean).join("");
     detailKvGrid.querySelector(".detail-smart-details")?.addEventListener("toggle", (event) => {
@@ -9060,7 +9108,12 @@
         kvRowIfMeaningful("Namespace EUI64", formatNamespaceEui64Value(storageViewSlot, smartEntry), true),
         kvRowIfMeaningful("Namespace NGUID", formatNamespaceNguidValue(smartEntry), true),
         kvRowIfMeaningful("Pool", storageViewSlot.pool_name),
-        kvRowIfMeaningful(state.snapshotMode ? "Health at capture" : "Health", storageViewSlot.health),
+        kvRowIfMeaningful(
+          state.snapshotMode ? "Health at capture" : "Health",
+          formatSlotHealth(storageViewSlot.health),
+          false,
+          slotHealthTitle(storageViewSlot.health),
+        ),
         kvRow("Temp", formatTemperatureValue(storageViewSlot, smartEntry)),
         kvRowIfMeaningful("Warning Temp", formatWarningTemperatureValue(smartEntry)),
         kvRowIfMeaningful("Critical Temp", formatCriticalTemperatureValue(smartEntry)),

@@ -222,7 +222,7 @@ test("search reports how many bays match, offers a clear control, and selects a 
 });
 
 test("bay tiles get a short accessible name and point at the tooltip for the rest", () => {
-  const { slotAccessibleName } = loadFunctions(["slotAccessibleName", "slotLocationLabel", "stateLabel"], {
+  const { slotAccessibleName } = loadFunctions(["slotAccessibleName", "slotLocationLabel", "stateLabel", "formatSlotHealth"], {
     currentPlatform: () => "core",
   });
   assert.equal(
