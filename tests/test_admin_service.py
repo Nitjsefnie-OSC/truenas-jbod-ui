@@ -4700,7 +4700,7 @@ class AdminSudoPreviewRouteTests(unittest.TestCase):
         command_tokens = shlex.split(payload["content"].strip())
         command_payload = json.loads(command_tokens[-1])
         self.assertIn("/usr/sbin/mprutil show adapters", command_payload["sudo_commands"])
-        self.assertIn("/usr/sbin/mprutil -u * show expanders", command_payload["sudo_commands"])
+        self.assertIn("/usr/sbin/mprutil ^-u [0-9]+ show expanders$", command_payload["sudo_commands"])
         self.assertIn("/usr/local/sbin/dmidecode -t slot", command_payload["sudo_commands"])
         self.assertIn("/usr/bin/tail -n 4000 /var/log/messages", command_payload["sudo_commands"])
         self.assertNotIn("/usr/sbin/mprutil -u 1 show expanders", command_payload["sudo_commands"])

@@ -277,7 +277,7 @@ regex entries. On an older host, enumerate the exact SMART device commands
 instead of replacing the regex with a wildcard.
 
 ```bash
-midclt call user.update USER_ID '{"sudo":true,"sudo_nopasswd":true,"sudo_commands":["/usr/sbin/sesutil map","/usr/sbin/sesutil show","/sbin/camcontrol devlist -v","/usr/sbin/sesutil locate -u /dev/ses* * on","/usr/sbin/sesutil locate -u /dev/ses* * off","/usr/local/sbin/smartctl ^-x -j /dev/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*(/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*){0,2}$","/usr/local/sbin/smartctl ^-x /dev/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*(/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*){0,2}$","/usr/sbin/mprutil show adapter","/usr/sbin/mprutil show adapters","/usr/sbin/mprutil show all","/usr/sbin/mprutil show devices","/usr/sbin/mprutil show enclosures","/usr/sbin/mprutil show expanders","/usr/sbin/mprutil show iocfacts","/usr/sbin/mprutil -u * show adapter","/usr/sbin/mprutil -u * show all","/usr/sbin/mprutil -u * show devices","/usr/sbin/mprutil -u * show enclosures","/usr/sbin/mprutil -u * show expanders","/usr/sbin/mprutil -u * show iocfacts","/usr/local/sbin/dmidecode -t slot","/usr/bin/tail -n 4000 /var/log/messages","/usr/local/bin/midclt call disk.multipath_sync","/usr/local/bin/midclt call disk.sync_all","/usr/local/bin/midclt ^call core\\.get_jobs \\[\\[\\\"id\\\"\\,\\\"=\\\"\\,[0-9]+\\]\\]$"]}'
+midclt call user.update USER_ID '{"sudo":true,"sudo_nopasswd":true,"sudo_commands":["/usr/sbin/sesutil map","/usr/sbin/sesutil show","/sbin/camcontrol devlist -v","/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ on$","/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ off$","/usr/local/sbin/smartctl ^-x -j /dev/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*(/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*){0,2}$","/usr/local/sbin/smartctl ^-x /dev/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*(/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*){0,2}$","/usr/sbin/mprutil show adapter","/usr/sbin/mprutil show adapters","/usr/sbin/mprutil show all","/usr/sbin/mprutil show devices","/usr/sbin/mprutil show enclosures","/usr/sbin/mprutil show expanders","/usr/sbin/mprutil show iocfacts","/usr/sbin/mprutil ^-u [0-9]+ show adapter$","/usr/sbin/mprutil ^-u [0-9]+ show all$","/usr/sbin/mprutil ^-u [0-9]+ show devices$","/usr/sbin/mprutil ^-u [0-9]+ show enclosures$","/usr/sbin/mprutil ^-u [0-9]+ show expanders$","/usr/sbin/mprutil ^-u [0-9]+ show iocfacts$","/usr/local/sbin/dmidecode -t slot","/usr/bin/tail -n 4000 /var/log/messages","/usr/local/bin/midclt call disk.multipath_sync","/usr/local/bin/midclt call disk.sync_all","/usr/local/bin/midclt ^call core\\.get_jobs \\[\\[\\\"id\\\"\\,\\\"=\\\"\\,[0-9]+\\]\\]$"]}'
 ```
 
 That enables:
@@ -292,7 +292,7 @@ That enables:
   `camcontrol devlist -v`
 - on-demand per-slot SMART detail through `smartctl`
 - SAS fabric/topology diagnostics through read-only `mprutil` commands,
-  including wildcarded per-HBA `mprutil -u N show ...` reads
+  including per-HBA `mprutil -u N show ...` reads
 - HBA PCIe slot labels through read-only `dmidecode -t slot` output joined to
   `pciconf -lv` PCI addresses
 - MPR kernel PCI topology hints through filtered `sysctl dev.mpr.N.%location`
@@ -320,17 +320,13 @@ first, for example with:
 find /usr -name smartctl
 ```
 
-This wildcard guidance for `sesutil locate` is an inference from standard
-`sudoers` command matching, which supports shell-style wildcards in command
-arguments. Validate it on your specific CORE build before relying on it
-broadly.
-
-On `The-Archive`, that wildcard-shaped `sesutil locate` allowance was manually
-validated on April 19, 2026 by toggling the slot identify LEDs successfully on
-slots `0` and `6`. The wildcard-shaped `mprutil -u * show ...` allowances were
-validated on May 19, 2026 against both `mpr0` and `mpr1` through the app's
-normal SSH path; parser coverage also pins multi-digit adapter units such as
-`mpr10` so the discovery path is not limited to two controllers.
+The `sesutil locate` and per-HBA `mprutil -u N show ...` entries are anchored
+regexes, not shell wildcards. Sudo joins the arguments with spaces before it
+matches a wildcard, so an entry such as `mprutil -u * show adapter` also
+admitted `mprutil -u 0 flash save /tmp/file show adapter`. The anchored forms
+admit only a numeric unit, `/dev/sesN`, and a numeric element, with nothing
+after the final word. Like the SMART entries they need sudo 1.9.10 or newer.
+Parser coverage pins multi-digit adapter units such as `mpr10`.
 
 ## Important Behavior On This CORE Build
 
@@ -681,9 +677,9 @@ per-device commands on an older host.
 
 ```bash
 jbodmap ALL=(root) NOPASSWD: /usr/sbin/smartctl ^-x -j /dev/nvme[0-9]+n[0-9]+$
-jbodmap ALL=(root) NOPASSWD: /usr/sbin/nvme smart-log -o json /dev/nvme*
-jbodmap ALL=(root) NOPASSWD: /usr/sbin/nvme id-ctrl -o json /dev/nvme*
-jbodmap ALL=(root) NOPASSWD: /usr/sbin/nvme id-ns -o json /dev/nvme*
+jbodmap ALL=(root) NOPASSWD: /usr/sbin/nvme ^smart-log -o json /dev/nvme[0-9]+$
+jbodmap ALL=(root) NOPASSWD: /usr/sbin/nvme ^id-ctrl -o json /dev/nvme[0-9]+$
+jbodmap ALL=(root) NOPASSWD: /usr/sbin/nvme ^id-ns -o json /dev/nvme[0-9]+n[0-9]+$
 jbodmap ALL=(root) NOPASSWD: /usr/bin/lsblk --json --bytes --output *
 jbodmap ALL=(root) NOPASSWD: /usr/sbin/mdadm --detail --scan
 jbodmap ALL=(root) NOPASSWD: /usr/sbin/mdadm --detail /dev/md*

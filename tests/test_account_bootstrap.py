@@ -207,7 +207,8 @@ class ServiceAccountBootstrapServiceTests(unittest.TestCase):
         self.assertIn("Cmnd_Alias JBODMAP_CORE_CMDS", content)
         self.assertIn("/usr/sbin/sesutil map", content)
         self.assertIn("/usr/sbin/mprutil show adapters", content)
-        self.assertIn("/usr/sbin/mprutil -u * show expanders", content)
+        self.assertIn("/usr/sbin/mprutil ^-u [0-9]+ show expanders$", content)
+        self.assertIn("/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ on$", content)
         self.assertIn("/usr/local/sbin/dmidecode -t slot", content)
         self.assertIn("/usr/bin/tail -n 4000 /var/log/messages", content)
         self.assertIn("jbodmap ALL=(root) NOPASSWD: JBODMAP_CORE_CMDS", content)
@@ -224,8 +225,8 @@ class ServiceAccountBootstrapServiceTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("/usr/sbin/mprutil -u * show expanders", content)
-        self.assertIn("/usr/sbin/mprutil -u * show iocfacts", content)
+        self.assertIn("/usr/sbin/mprutil ^-u [0-9]+ show expanders$", content)
+        self.assertIn("/usr/sbin/mprutil ^-u [0-9]+ show iocfacts$", content)
         self.assertIn("/usr/sbin/mprutil show adapters", content)
         self.assertNotIn("/usr/sbin/mprutil -u 1 show expanders", content)
         self.assertNotIn("/usr/sbin/mprutil *", content)
@@ -270,7 +271,7 @@ class ServiceAccountBootstrapServiceTests(unittest.TestCase):
         self.assertEqual(tokens[:4], ["midclt", "call", "user.update", "USER_ID"])
         self.assertTrue(payload["sudo"])
         self.assertTrue(payload["sudo_nopasswd"])
-        self.assertIn("/usr/sbin/mprutil -u * show expanders", payload["sudo_commands"])
+        self.assertIn("/usr/sbin/mprutil ^-u [0-9]+ show expanders$", payload["sudo_commands"])
         self.assertIn("/usr/sbin/mprutil show adapters", payload["sudo_commands"])
         self.assertIn("/usr/local/sbin/dmidecode -t slot", payload["sudo_commands"])
         self.assertIn("/usr/bin/tail -n 4000 /var/log/messages", payload["sudo_commands"])
@@ -741,6 +742,67 @@ class BootstrapSudoGrantContractTests(unittest.IsolatedAsyncioTestCase):
                     [],
                     f"{platform} supplemental sudo grants do not cover: " + ", ".join(ungranted),
                 )
+
+    def test_no_grant_uses_a_glob_that_can_cross_arguments(self) -> None:
+        # Sudo joins argv with spaces before matching a glob, so `*` can match
+        # extra arguments. Every argument pattern must be an anchored regex or
+        # an exact command.
+        from admin_service.services.account_bootstrap import SUPPLEMENTAL_SUDO_COMMANDS_BY_PLATFORM
+
+        for source in (SUDO_COMMANDS_BY_PLATFORM, SUPPLEMENTAL_SUDO_COMMANDS_BY_PLATFORM):
+            for platform, grants in source.items():
+                for grant in grants:
+                    with self.subTest(platform=platform, grant=grant):
+                        arguments = grant.split(maxsplit=1)[1] if " " in grant else ""
+                        if arguments.startswith("^") and arguments.endswith("$"):
+                            continue
+                        self.assertFalse(
+                            any(character in arguments for character in "*?["),
+                            "argument glob can match extra arguments",
+                        )
+
+    def test_mprutil_sesutil_and_nvme_grants_refuse_extra_arguments(self) -> None:
+        cases = {
+            "core": (
+                (
+                    "/usr/sbin/mprutil -u 0 show adapter",
+                    "/usr/sbin/mprutil -u 10 show expanders",
+                    "/usr/sbin/sesutil locate -u /dev/ses5 3 on",
+                    "/usr/sbin/sesutil locate -u /dev/ses12 59 off",
+                ),
+                (
+                    # The unit glob used to admit a whole mprutil command line.
+                    "/usr/sbin/mprutil -u 0 flash save /tmp/synthetic show adapter",
+                    "/usr/sbin/mprutil -u 0 show adapter extra",
+                    "/usr/sbin/sesutil locate -u /dev/ses5 all on",
+                    "/usr/sbin/sesutil locate -u /dev/ses5 3 on -u /dev/ses6 4 on",
+                    "/usr/sbin/sesutil locate -u /dev/ses5 3 fault on",
+                ),
+            ),
+            "linux": (
+                (
+                    "/usr/sbin/nvme smart-log -o json /dev/nvme0",
+                    "/usr/sbin/nvme id-ctrl -o json /dev/nvme12",
+                    "/usr/sbin/nvme id-ns -o json /dev/nvme0n1",
+                ),
+                (
+                    "/usr/sbin/nvme smart-log -o json /dev/nvme0 --namespace-id=2",
+                    "/usr/sbin/nvme id-ns -o json /dev/nvme0n1 extra",
+                    "/usr/sbin/nvme id-ctrl -o json /dev/nvme0 -o binary",
+                ),
+            ),
+        }
+        from admin_service.services.account_bootstrap import SUPPLEMENTAL_SUDO_COMMANDS_BY_PLATFORM
+
+        for platform, (allowed, refused) in cases.items():
+            for source in (SUDO_COMMANDS_BY_PLATFORM, SUPPLEMENTAL_SUDO_COMMANDS_BY_PLATFORM):
+                grants = source[platform]
+                for command in allowed:
+                    with self.subTest(platform=platform, allowed=command):
+                        self.assertTrue(any(sudoers_grant_matches(grant, command) for grant in grants))
+                for command in refused:
+                    with self.subTest(platform=platform, refused=command):
+                        self.assertFalse(any(sudoers_grant_matches(grant, command) for grant in grants))
 
     def test_sg_ses_grants_reject_options_after_the_device_argument(self) -> None:
         injected = (

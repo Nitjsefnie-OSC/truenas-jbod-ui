@@ -15,9 +15,9 @@ Hardware:
 - Sudo rules granted for:
   - `smartctl -x -j /dev/sd*`
   - `smartctl -x -j /dev/nvme*n*`
-  - `nvme smart-log -o json /dev/nvme*`
-  - `nvme id-ctrl -o json /dev/nvme*`
-  - `nvme id-ns -o json /dev/nvme*`
+  - `nvme smart-log -o json /dev/nvmeN`
+  - `nvme id-ctrl -o json /dev/nvmeN`
+  - `nvme id-ns -o json /dev/nvmeNnM`
   - `lsscsi -g`
   - `lsblk -OJ`
   - `mdadm --detail --scan`

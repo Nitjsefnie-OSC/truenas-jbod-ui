@@ -28,6 +28,15 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ## Unreleased
 
+### Security
+
+- The admin bootstrap's `mprutil -u`, `sesutil locate` and `nvme` sudo grants
+  are now anchored patterns instead of wildcards. A wildcard let sudo accept
+  extra arguments, so the old `mprutil -u * show adapter` grant also allowed
+  `mprutil -u 0 flash save ... show adapter` as root. Re-run SSH access setup
+  on existing hosts to replace their stored grants (needs sudo 1.9.10 or
+  newer) (#942).
+
 ### Added
 
 - Added a per-system opening order for live enclosures and saved views. Without
