@@ -49,6 +49,10 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   cannot tell you. (#939)
 ### Fixed
 
+- Storage Fabric now matches each bay to its controller entry by the disk's
+  CAM target instead of its enclosure slot number. On a cascaded JBOD, every
+  rear-shelf bay used to show the next bay's SAS address, controller row and
+  kernel errors (#940).
 - Made locate-light actions use a short independent session, return immediate
   hardware confirmation, and retain their result across page refreshes. Each
   press first checks, in the same session, that the enclosure device still
