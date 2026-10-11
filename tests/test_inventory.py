@@ -3950,7 +3950,13 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
                 "synthetic-system", "enc-a", "Enclosure A", 4, options,
             )
             snapshots["enc-a"] = refreshed
-            service._publish_snapshot_locked("enc-a", refreshed, request_sequence=1)
+            service._publish_snapshot_locked(
+                "enc-a",
+                refreshed,
+                request_sequence=1,
+                source_publication=inventory_module.SourcePublication(),
+                minimum_source_publication=None,
+            )
 
             after = asyncio.run(service.get_storage_view_runtime(selected_enclosure_id="enc-b"))
 
