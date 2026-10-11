@@ -1504,6 +1504,10 @@ ses0:
         # No status bytes printed: the flags stay unknown, not false.
         self.assertEqual(values(slots[4]), dict.fromkeys(flags, None))
 
+        padded = SESMapSlot(slot_number=0)
+        parsers._apply_ses_status_bytes(padded, "OK" + " " * 65536 + "(0x11 0x00 0x00 0x00)", "Array Device Slot")
+        self.assertIs(padded.swapped, True)
+
         candidates, _ = build_slot_candidates_from_ses_enclosures(parsed, 5, None)
         self.assertIs(candidates[0]["ses_swapped"], True)
         self.assertIs(candidates[1]["ses_predicted_failure"], True)

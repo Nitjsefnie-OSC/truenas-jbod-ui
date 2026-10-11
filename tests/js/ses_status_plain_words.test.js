@@ -59,6 +59,25 @@ test("enclosure status bytes read as plain words", () => {
   assert.equal(formatSlotHealth(""), "");
 });
 
+test("long health text is capped and parsed in linear time", () => {
+  const { formatSlotHealth, slotHealthTitle } = loadFunctions(["formatSlotHealth", "slotHealthTitle"]);
+  // A status padded with whitespace used to backtrack quadratically through
+  // the suffix pattern on every grid render.
+  const padded = `OK${" ".repeat(64 * 1024)}x`;
+  const started = process.hrtime.bigint();
+  const shown = formatSlotHealth(padded);
+  const title = slotHealthTitle(padded);
+  const tail = formatSlotHealth(`OK${" ".repeat(64 * 1024)}(0x11 0x00 0x00 0x00)`);
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+  assert.ok(elapsedMs < 250, `took ${elapsedMs.toFixed(1)} ms`);
+  assert.ok(shown.length <= 160, `shown ${shown.length} characters`);
+  assert.ok(shown.endsWith("\u2026"));
+  assert.equal(title, "");
+  assert.equal(tail, "OK, reseated or replaced");
+  assert.equal(formatSlotHealth("OK  (0x11 0x00 0x00 0x00)  "), "OK, reseated or replaced");
+});
+
 test("the raw enclosure status stays reachable as a hover title", () => {
   const { slotHealthTitle } = loadFunctions(["slotHealthTitle"]);
 

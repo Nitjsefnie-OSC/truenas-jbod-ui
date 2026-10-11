@@ -759,7 +759,8 @@ SES_STATUS_BYTES_REGEX = re.compile(
 
 
 def _apply_ses_status_bytes(slot: SESMapSlot, status: str | None, element_type: str | None) -> None:
-    match = SES_STATUS_BYTES_REGEX.search(status or "")
+    # The byte suffix is at most 39 characters; only that tail is searched.
+    match = SES_STATUS_BYTES_REGEX.search((status or "").rstrip()[-40:])
     if not match:
         return
     common, byte1, byte2, byte3 = (int(value, 16) for value in match.groups())

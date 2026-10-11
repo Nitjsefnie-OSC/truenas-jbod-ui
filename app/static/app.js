@@ -4492,30 +4492,43 @@
   // The enclosure reports a bay as a status name and its four SES status bytes,
   // such as "OK (0x11 0x00 0x00 0x00)". Byte 0 holds the status code in its low
   // four bits and the predicted-failure (0x40), disabled (0x20) and swap (0x10)
-  // flags above it (SES-3 table 72). Other health text passes through.
+  // flags above it (SES-3 table 72). Other health text passes through. The text
+  // comes from the appliance and runs on every grid render, so the byte suffix
+  // is found by position and only that short tail is matched, and the shown
+  // value is capped.
   function formatSlotHealth(value) {
     if (value === null || value === undefined) {
       return value;
     }
-    const text = String(value);
-    const match = text.match(/^(.*?)\s*\((0x[0-9a-f]{2})\s+0x[0-9a-f]{2}\s+0x[0-9a-f]{2}\s+0x[0-9a-f]{2}\)\s*$/i);
-    if (!match) {
-      return text;
+    const text = String(value).trim();
+    const open = text.endsWith(")") ? text.lastIndexOf("(") : -1;
+    const bytes = open >= 0 && text.length - open <= 40
+      ? text.slice(open).match(/^\((0x[0-9a-f]{2})\s+0x[0-9a-f]{2}\s+0x[0-9a-f]{2}\s+0x[0-9a-f]{2}\)$/i)
+      : null;
+    let shown = text;
+    if (bytes) {
+      const common = Number.parseInt(bytes[1], 16);
+      if ((common & 0x0f) === 0x05) {
+        return "Empty bay";
+      }
+      const parts = [text.slice(0, open).trim() || "Unknown"];
+      if (common & 0x40) parts.push("predicted failure");
+      if (common & 0x20) parts.push("disabled");
+      if (common & 0x10) parts.push("reseated or replaced");
+      shown = parts.join(", ");
     }
-    const common = Number.parseInt(match[2], 16);
-    if ((common & 0x0f) === 0x05) {
-      return "Empty bay";
-    }
-    const parts = [match[1].trim() || "Unknown"];
-    if (common & 0x40) parts.push("predicted failure");
-    if (common & 0x20) parts.push("disabled");
-    if (common & 0x10) parts.push("reseated or replaced");
-    return parts.join(", ");
+    return shown.length > 160 ? `${shown.slice(0, 159)}\u2026` : shown;
   }
 
   function slotHealthTitle(value) {
-    const text = value === null || value === undefined ? "" : String(value);
-    return /\(0x[0-9a-f]{2}(?:\s+0x[0-9a-f]{2}){3}\)\s*$/i.test(text) ? `Enclosure status: ${text}` : "";
+    const text = value === null || value === undefined ? "" : String(value).trim();
+    const open = text.endsWith(")") ? text.lastIndexOf("(") : -1;
+    if (open < 0 || text.length - open > 40 || !/^\(0x[0-9a-f]{2}(?:\s+0x[0-9a-f]{2}){3}\)$/i.test(text.slice(open))) {
+      return "";
+    }
+    const name = text.slice(0, open).trim();
+    const shownName = name.length > 120 ? `${name.slice(0, 119)}\u2026` : name;
+    return `Enclosure status: ${shownName ? `${shownName} ` : ""}${text.slice(open)}`;
   }
 
   function formatSesStateValue(slot) {
