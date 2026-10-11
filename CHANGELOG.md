@@ -46,7 +46,7 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   the status bytes `sesutil map` already prints. NAK received, ACK/NAK
   timeout, initiator response timeout and iuCRC errors in the Storage Fabric
   diagnostics now say what the standard means by each code and what the code
-  cannot tell you. (#PR)
+  cannot tell you. (#939)
 ### Fixed
 
 - Selecting a bay, or a path in the Connections panel, no longer removes the
