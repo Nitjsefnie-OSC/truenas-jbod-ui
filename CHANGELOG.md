@@ -49,6 +49,11 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   cannot tell you. (#939)
 ### Fixed
 
+- History records UNVR and UNVR Pro bays again when only an optional SSH
+  command, such as `lsscsi -g -t`, fails. Hosts whose bay-map commands fail,
+  such as ESXi without StorCLI, are still skipped. The history dashboard and
+  `/healthz` now list every skipped system and the reason. Broke in
+  v0.23.0. (#929)
 - Selecting a bay, or a path in the Connections panel, no longer removes the
   state chip from that bay and its highlighted peers. Every bay, including
   NVMe carrier and boot-device cards, keeps its LED dot, and a bay with its
