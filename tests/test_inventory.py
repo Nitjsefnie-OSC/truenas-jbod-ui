@@ -14949,6 +14949,46 @@ class InventoryServiceSnapshotStateBoundsTests(unittest.IsolatedAsyncioTestCase)
             self.assertEqual(set(service._canonical_enclosure_options or {}), {"enc-b", "enc-c"})
             self.assertEqual(service._canonical_default_enclosure_id, "enc-c")
 
+    async def test_retired_enclosure_drops_its_remembered_locate_targets(self) -> None:
+        # A stale tab must not keep locating a bay on a shelf that discovery
+        # retired: its old /dev/sesN may now belong to a different shelf.
+        def led_slot(enclosure_id: str) -> SlotView:
+            return SlotView(
+                slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id=enclosure_id,
+                led_supported=True, led_backend="ssh", ssh_ses_device="/dev/ses0", ssh_ses_element_id=0,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._service(temp_dir)
+            first = self._snapshot("enc-a").model_copy(update={"slots": [led_slot("enc-a")]})
+            retired = InventorySnapshot(
+                slots=[led_slot("enc-b")],
+                refresh_interval_seconds=30,
+                selected_system_id="bounded",
+                selected_system_platform="core",
+                selected_enclosure_id="enc-b",
+                enclosures=[EnclosureOption(id="enc-b", label="Shelf B")],
+            )
+            service._build_snapshot = AsyncMock(side_effect=[first, retired])
+            service._run_led_ssh_sequence = AsyncMock(side_effect=AssertionError("must not run a locate command"))
+
+            await service.get_snapshot(selected_enclosure_id="enc-a")
+            self.assertIsNotNone(service._resolve_led_slot(0, "enc-a"))
+
+            await service.get_snapshot(force_refresh=True, selected_enclosure_id="enc-b")
+
+            self.assertNotIn("enc-a", service._canonical_enclosure_options or {})
+            self.assertIsNone(service._resolve_led_slot(0, "enc-a"))
+            self.assertFalse(
+                [key for key, target in service._led_slot_targets.items()
+                 if key[0] == "enc-a" or target.enclosure_id == "enc-a"]
+            )
+            with self.assertRaises(TrueNASAPIError):
+                await service.set_slot_led(0, LedAction.identify, "enc-a", invalidate_snapshot=False)
+            service._run_led_ssh_sequence.assert_not_awaited()
+            # The surviving shelf still resolves.
+            self.assertEqual(service._resolve_led_slot(0, "enc-b").enclosure_id, "enc-b")
+
     async def test_unreachable_source_returns_its_snapshot_and_rediscovers_later(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = self._service(temp_dir)

@@ -1916,7 +1916,27 @@ class InventoryService:
         self._canonical_options_request_sequence = request_sequence
         for key in removed_keys:
             self._remove_snapshot_state_key(key, cancel_task=True)
+        self._forget_led_targets(removed_keys, request_sequence=request_sequence)
         return True
+
+    def _forget_led_targets(self, enclosure_ids: set[str], *, request_sequence: int) -> None:
+        """Drop remembered locate targets on retired enclosures.
+
+        A retired shelf's old /dev/sesN can be reassigned to another shelf, so
+        a stale tab must not keep sending locate commands through it. The
+        retirement's sequence also blocks an older in-flight build from
+        remembering those targets again.
+        """
+        if not enclosure_ids:
+            return
+        for target_key, target in tuple(self._led_slot_targets.items()):
+            if target_key[0] in enclosure_ids or target.enclosure_id in enclosure_ids:
+                self._led_slot_targets.pop(target_key, None)
+        for enclosure_id in enclosure_ids:
+            self._led_slot_target_sequences[enclosure_id] = max(
+                self._led_slot_target_sequences.get(enclosure_id, -1),
+                request_sequence,
+            )
 
     async def get_sas_fabric_snapshot(
         self,
