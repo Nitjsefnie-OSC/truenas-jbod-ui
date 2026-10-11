@@ -205,7 +205,9 @@
       document.getElementById("status-history-collection-paused")?.classList?.toggle("status-error", collector.history_collection_paused);
     }
     setText("status-last-inventory-at", formatTimestamp(collector.last_inventory_at));
-    // #927: scopes the last scan read but did not record, with the reason.
+    // #927: the last known skipped scopes, with the reason. A root-only scan
+    // keeps entries for scopes it did not revisit, so this is not only the
+    // last scan.
     const skippedLabel = skippedScopesLabel(collector.last_skipped_scopes);
     setText("status-last-skipped-scopes", skippedLabel);
     document.getElementById("status-last-skipped-scopes")?.classList?.toggle(

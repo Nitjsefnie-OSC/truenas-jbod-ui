@@ -674,7 +674,7 @@ class HistoryDashboardRouteTests(unittest.TestCase):
                     status["last_skipped_scopes"] = value
                 markup = self._render_dashboard(status, counts, [])
                 match = re.search(
-                    r'<dt>Skipped in last scan</dt><dd id="status-last-skipped-scopes" class="([^"]*)">(.*?)</dd>',
+                    r'<dt>Last known skipped scopes</dt><dd id="status-last-skipped-scopes" class="([^"]*)">(.*?)</dd>',
                     markup,
                 )
                 self.assertIsNotNone(match)
