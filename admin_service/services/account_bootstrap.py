@@ -30,12 +30,18 @@ CORE_MPRUTIL_SUDO_COMMANDS = (
     "/usr/sbin/mprutil show enclosures",
     "/usr/sbin/mprutil show expanders",
     "/usr/sbin/mprutil show iocfacts",
-    "/usr/sbin/mprutil -u * show adapter",
-    "/usr/sbin/mprutil -u * show all",
-    "/usr/sbin/mprutil -u * show devices",
-    "/usr/sbin/mprutil -u * show enclosures",
-    "/usr/sbin/mprutil -u * show expanders",
-    "/usr/sbin/mprutil -u * show iocfacts",
+    # Anchored, backslash-free EREs (sudo 1.9.10+). A `-u *` glob let sudo
+    # match any argument list that ended in `show <page>`.
+    "/usr/sbin/mprutil ^-u [0-9]+ show adapter$",
+    "/usr/sbin/mprutil ^-u [0-9]+ show all$",
+    "/usr/sbin/mprutil ^-u [0-9]+ show devices$",
+    "/usr/sbin/mprutil ^-u [0-9]+ show enclosures$",
+    "/usr/sbin/mprutil ^-u [0-9]+ show expanders$",
+    "/usr/sbin/mprutil ^-u [0-9]+ show iocfacts$",
+)
+CORE_SESUTIL_LOCATE_SUDO_COMMANDS = (
+    "/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ on$",
+    "/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ off$",
 )
 CORE_DMIDECODE_SUDO_COMMANDS = (
     "/usr/local/sbin/dmidecode -t slot",
@@ -64,9 +70,9 @@ SMARTCTL_SUDO_COMMANDS = (
     r"/usr/local/sbin/smartctl ^-d [A-Za-z0-9][A-Za-z0-9_:+./-]*(\,[A-Za-z0-9][A-Za-z0-9_:+./-]*)* -x /dev/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*(/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*){0,2}$",
 )
 LINUX_NVME_SUDO_COMMANDS = (
-    "/usr/sbin/nvme smart-log -o json /dev/nvme*",
-    "/usr/sbin/nvme id-ctrl -o json /dev/nvme*",
-    "/usr/sbin/nvme id-ns -o json /dev/nvme*",
+    "/usr/sbin/nvme ^smart-log -o json /dev/nvme[0-9]+$",
+    "/usr/sbin/nvme ^id-ctrl -o json /dev/nvme[0-9]+$",
+    "/usr/sbin/nvme ^id-ns -o json /dev/nvme[0-9]+n[0-9]+$",
 )
 CORE_MPRUTIL_SHOW_COMMANDS = {
     "adapter",
@@ -95,8 +101,7 @@ SUDO_COMMANDS_BY_PLATFORM: dict[str, tuple[str, ...]] = {
     "core": (
         "/usr/sbin/sesutil map",
         "/usr/sbin/sesutil show",
-        "/usr/sbin/sesutil locate -u /dev/ses* * on",
-        "/usr/sbin/sesutil locate -u /dev/ses* * off",
+        *CORE_SESUTIL_LOCATE_SUDO_COMMANDS,
         "/sbin/camcontrol devlist -v",
         *SMARTCTL_SUDO_COMMANDS,
         *CORE_MPRUTIL_SUDO_COMMANDS,
@@ -123,8 +128,7 @@ SUDO_COMMANDS_BY_PLATFORM: dict[str, tuple[str, ...]] = {
 }
 SUPPLEMENTAL_SUDO_COMMANDS_BY_PLATFORM: dict[str, tuple[str, ...]] = {
     "core": (
-        "/usr/sbin/sesutil locate -u /dev/ses* * on",
-        "/usr/sbin/sesutil locate -u /dev/ses* * off",
+        *CORE_SESUTIL_LOCATE_SUDO_COMMANDS,
         *SMARTCTL_SUDO_COMMANDS,
         *CORE_MPRUTIL_SUDO_COMMANDS,
         *CORE_DMIDECODE_SUDO_COMMANDS,
@@ -646,7 +650,7 @@ class ServiceAccountBootstrapService:
         if executable_name == "sesutil" and len(args) >= 5 and args[:2] == ["locate", "-u"]:
             state = args[-1].lower()
             if args[2].startswith("/dev/ses") and state in {"on", "off"}:
-                return f"{executable} locate -u /dev/ses* * {state}"
+                return f"{executable} ^locate -u /dev/ses[0-9]+ [0-9]+ {state}$"
 
         if executable_name == "mprutil":
             if len(args) >= 2 and args[0].lower() == "show":
@@ -656,7 +660,7 @@ class ServiceAccountBootstrapService:
             if len(args) >= 4 and args[0].lower() == "-u" and args[2].lower() == "show":
                 subcommand = args[3].lower()
                 if subcommand in CORE_MPRUTIL_UNIT_SHOW_COMMANDS:
-                    return f"{executable} -u * show {subcommand}"
+                    return f"{executable} ^-u [0-9]+ show {subcommand}$"
 
         if executable_name == "dmidecode":
             lowered_args = [arg.lower() for arg in args]

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "modules": {
-    "test_account_bootstrap": 28,
+    "test_account_bootstrap": 30,
     "test_admin_auth": 28,
     "test_admin_command_state": 5,
     "test_admin_config": 6,
