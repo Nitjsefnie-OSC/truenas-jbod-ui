@@ -18424,6 +18424,70 @@ ses1:
             1,
         )
 
+    async def test_locate_ssh_sessions_are_bounded_per_host_without_the_inventory_lock(self) -> None:
+        slot = SlotView(slot=0, slot_label="00", row_index=0, column_index=0, enclosure_id="shelf-a")
+        service = self.led_service("core", slot)
+        release = asyncio.Event()
+        open_now = 0
+        peak = 0
+        opened: list[str] = []
+
+        class GatedSession:
+            def __init__(self, host: str) -> None:
+                self.host = host
+
+            async def run_command_owned(self, command: str, **_kwargs) -> SSHCommandResult:
+                await release.wait()
+                return SSHCommandResult(command=command, ok=True, exit_code=0)
+
+            async def close_owned(self) -> None:
+                nonlocal open_now
+                open_now -= 1
+
+        def probe_for(host: str) -> Mock:
+            probe = Mock(spec=SSHProbe)
+
+            def open_session() -> GatedSession:
+                nonlocal open_now, peak
+                open_now += 1
+                peak = max(peak, open_now)
+                opened.append(host)
+                return GatedSession(host)
+
+            probe.open_session.side_effect = open_session
+            return probe
+
+        probes = {"host.example.test": probe_for("host.example.test"), "other.example.test": probe_for("other.example.test")}
+        service._ssh_probe_for_host = lambda host: probes[host or "host.example.test"]
+        service._ssh_destination_authority_approved = lambda host=None: True
+        inventory_lock = service._ssh_session_lock_for_host()
+
+        with patch.object(inventory_module, "LED_SSH_ADMISSION_WAIT_SECONDS", 0.05):
+            running = [
+                asyncio.create_task(service._run_led_ssh_sequence(None, ["locate", "readback"]))
+                for _ in range(inventory_module.LED_SSH_SESSIONS_PER_HOST)
+            ]
+            await asyncio.sleep(0)
+            # Every slot for this host is taken: the next press waits briefly,
+            # then is refused without opening another login.
+            with self.assertRaises(inventory_module.LedSessionBusyError) as refused:
+                await service._run_led_ssh_sequence(None, ["locate", "readback"])
+            self.assertIsInstance(refused.exception, TrueNASAPIError)
+            self.assertIn("Try again", str(refused.exception))
+            self.assertEqual(opened.count("host.example.test"), inventory_module.LED_SSH_SESSIONS_PER_HOST)
+            # Another host is not held up by the first host's presses.
+            other = asyncio.create_task(service._run_led_ssh_sequence("other.example.test", ["locate"]))
+            await asyncio.sleep(0)
+            self.assertEqual(opened.count("other.example.test"), 1)
+            self.assertFalse(inventory_lock.locked())
+            release.set()
+            await asyncio.gather(*running, other)
+
+        self.assertEqual(peak, inventory_module.LED_SSH_SESSIONS_PER_HOST + 1)
+        self.assertEqual(open_now, 0)
+        # A freed slot admits the next press.
+        self.assertEqual(len(await service._run_led_ssh_sequence(None, ["locate"])), 1)
+
     def test_partial_led_readback_reports_off_only_when_every_path_was_read(self) -> None:
         # One path read "off" and the other could not be read: the light may
         # still be on through the unread path, so the state is unknown.

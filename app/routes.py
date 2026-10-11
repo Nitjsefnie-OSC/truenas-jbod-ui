@@ -95,7 +95,7 @@ from app.services.history_backend import (
     HistoryBackendPolicyError,
 )
 from app.services.history_status import project_public_collector_status
-from app.services.inventory import DiskInventorySyncBusy
+from app.services.inventory import DiskInventorySyncBusy, LedSessionBusyError
 from app.services.mapping_store import (
     MappingImportDigestMismatch,
     MappingRevisionConflict,
@@ -600,6 +600,14 @@ def build_router() -> APIRouter:
                 selected_enclosure_id=enclosure_id,
                 invalidate_snapshot=False,
             )
+        except LedSessionBusyError as exc:
+            logger.info(
+                "Locate light busy system=%s bay %s action=%s",
+                service.system.id,
+                slot,
+                payload.action.value,
+            )
+            raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "2"}) from exc
         except TrueNASAPIError as exc:
             logger.info(
                 "Locate light refusal system=%s bay %s action=%s reason=%s",

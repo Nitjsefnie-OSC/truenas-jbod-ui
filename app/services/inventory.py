@@ -302,6 +302,12 @@ class DiskInventorySyncBusy(TrueNASAPIError):
     """Another disk inventory sync is already running for this system."""
 
 
+class LedSessionBusyError(TrueNASAPIError):
+    """Every locate-light SSH slot for the host is in use; the press may be retried."""
+
+    retryable = True
+
+
 @dataclass(slots=True)
 class _DiskInventorySyncState:
     """Mutable state handed intact to services built by later generations."""
@@ -447,6 +453,13 @@ SSH_PLAN_GATHER_TURNS = 3
 PARSED_SSH_BUNDLE_CACHE_MAX_ENTRIES = 64
 QUANTASTOR_ENCLOSURE_OPTIONS_MAX_ENTRIES = 64
 SNAPSHOT_STATE_MAX_ENTRIES = 64
+# Locate presses each open their own short SSH login, separate from the
+# inventory session (#926). Bound them per host so a burst of presses cannot
+# exceed sshd MaxStartups or trip IPS "SSH scan" rules and lock out inventory
+# and the operator's own shells (see app/services/ssh_probe.py). Two lets an
+# on/off pair overlap; a further press waits briefly, then is refused.
+LED_SSH_SESSIONS_PER_HOST = 2
+LED_SSH_ADMISSION_WAIT_SECONDS = 5.0
 # The system-wide retention check (#911) builds one snapshot per enclosure
 # option. Real systems have a handful; refuse a topology far past that rather
 # than let one unauthenticated request occupy the worker for every one of them.
@@ -1270,6 +1283,8 @@ class InventoryService:
         self._snapshot_topology_generation = 0
         self._source_bundle_lock = asyncio.Lock()
         self._ssh_session_locks: dict[str, asyncio.Lock] = {}
+        # Locate-light SSH admission, per host, apart from the inventory locks.
+        self._led_ssh_semaphores: dict[str, asyncio.Semaphore] = {}
         # One probe per HA node or extra host, so each keeps its own connection.
         self._ssh_host_probes: dict[str, SSHProbe] = {}
         # Planned SSH sessions waiting for the per-host connection, and the task
@@ -14472,17 +14487,35 @@ class InventoryService:
             return fallback_results
 
         # This session deliberately bypasses the shared optional-SSH session
-        # lock. A locate click must not queue behind a full inventory scrape.
-        session = probe.open_session()
-        results: list[tuple[SSHCommandResult, float]] = []
+        # lock. A locate click must not queue behind a full inventory scrape,
+        # but locate logins to one host are bounded among themselves.
+        admission = self._led_ssh_semaphore_for_host(target_host)
         try:
-            for command in commands:
-                started = time.perf_counter()
-                result = await session.run_command_owned(command)
-                results.append((result, max(0.0, time.perf_counter() - started)))
+            await asyncio.wait_for(admission.acquire(), timeout=LED_SSH_ADMISSION_WAIT_SECONDS)
+        except TimeoutError as exc:
+            raise LedSessionBusyError(
+                "Other locate-light requests to this system are still running. Try again in a moment."
+            ) from exc
+        try:
+            session = probe.open_session()
+            results: list[tuple[SSHCommandResult, float]] = []
+            try:
+                for command in commands:
+                    started = time.perf_counter()
+                    result = await session.run_command_owned(command)
+                    results.append((result, max(0.0, time.perf_counter() - started)))
+            finally:
+                await session.close_owned()
         finally:
-            await session.close_owned()
+            admission.release()
         return results
+
+    def _led_ssh_semaphore_for_host(self, host: str | None) -> asyncio.Semaphore:
+        key = self._optional_ssh_backoff_key(host)
+        semaphore = self._led_ssh_semaphores.get(key)
+        if semaphore is None:
+            semaphore = self._led_ssh_semaphores[key] = asyncio.Semaphore(LED_SSH_SESSIONS_PER_HOST)
+        return semaphore
 
     async def _set_unifi_slot_led_over_ssh(
         self,

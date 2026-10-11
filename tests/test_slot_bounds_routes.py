@@ -931,6 +931,28 @@ class DegradedReadSlotBoundsTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 503)
         self.service.get_slot_smart_summaries.assert_not_awaited()
 
+    def test_led_mutation_reports_a_busy_host_as_retryable(self) -> None:
+        from app.services.inventory import LedSessionBusyError
+
+        route = _route("/api/slots/{slot}/led", "POST")
+        self.service.set_slot_led = AsyncMock(
+            side_effect=LedSessionBusyError("Other locate-light requests to this system are still running. Try again in a moment.")
+        )
+        self.service.schedule_led_snapshot_refresh = Mock()
+        payload = Mock(action=Mock(value="IDENTIFY"))
+
+        with (
+            patch.object(app_routes, "get_inventory_registry", return_value=self.registry),
+            patch.object(app_routes, "add_perf_metadata"),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(route.endpoint(slot=5, payload=payload, system_id="system-a", enclosure_id="enc-a"))
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(raised.exception.headers, {"Retry-After": "2"})
+        self.assertIn("Try again", raised.exception.detail)
+        self.service.schedule_led_snapshot_refresh.assert_not_called()
+
     def test_led_mutation_uses_retained_target_when_layout_read_is_unavailable(self) -> None:
         route = _route("/api/slots/{slot}/led", "POST")
         result = {
