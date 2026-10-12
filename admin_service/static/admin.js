@@ -2809,6 +2809,15 @@
     if (pinnedProfile && addableProfiles.some((profile) => profile.id === pinnedProfile.id)) {
       return storageViewAddValueForProfile(pinnedProfile.id);
     }
+    // A card or rear-group pin is offered as its internal view (#952).
+    const pinnedTemplate = pinnedProfile
+      ? state.storageViewTemplates.find(
+        (template) => template.kind !== "ses_enclosure" && template.same_hardware_profile_id === pinnedProfile.id
+      )
+      : null;
+    if (pinnedTemplate) {
+      return pinnedTemplate.id;
+    }
     const firstProfile = addableProfiles[0];
     if (firstProfile) {
       return storageViewAddValueForProfile(firstProfile.id);

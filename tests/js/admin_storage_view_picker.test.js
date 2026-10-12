@@ -154,13 +154,23 @@ test("Add a view uses the explicit template map, not matching labels", () => {
   assert.ok(addViewOptions(api).some((option) => option.value === "profile:generic-front-24-1x24"));
 });
 
-test("Add a view defaults to an offered entry when the system is pinned to the card profile", () => {
+test("Add a view defaults to the matching internal view when the system is pinned to the card profile", () => {
+  // Codex review on #966: falling through to the first chassis profile made
+  // Add create an unrelated chassis view for an AOC- or FatTwin-rear system.
+  const expected = {
+    "supermicro-aoc-slg4-2h8m2": "aoc-slg4-2h8m2-2",
+    "supermicro-fat-twin-rear-2": "fat-twin-rear-2",
+  };
   for (const pinned of EXCLUDED_PROFILE_IDS) {
     const { api } = load({ selectedProfileId: pinned });
     const values = addViewOptions(api).map((option) => option.value);
     const defaultValue = api.storageViewAddDefaultValue();
     assert.ok(values.includes(defaultValue), `${pinned}: default ${defaultValue} is not an option`);
+    assert.equal(defaultValue, expected[pinned], pinned);
   }
+  // A chassis pin still defaults to its own saved chassis view.
+  const { api } = load({ selectedProfileId: "supermicro-fat-twin-front-6" });
+  assert.equal(api.storageViewAddDefaultValue(), "profile:supermicro-fat-twin-front-6");
 });
 
 test("System Chassis layout lists chassis and shelf profiles only", () => {
