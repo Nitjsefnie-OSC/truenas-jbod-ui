@@ -47,6 +47,10 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   script on stdin, stops before any change when the CORE account is missing or
   its home is not under `/mnt`, and stores SMART grants that still match after
   the middleware escapes commas (#957).
+- The TrueNAS CORE one-time bootstrap stopped when the service account did not
+  exist yet. It now creates the account through `midclt call user.create` when
+  the new Home directory field names a folder on a pool, and the unused
+  bootstrap sudo-password field was removed (#960).
 - On TrueNAS CORE with SSH, the page no longer asked to turn on SSH when SSH
   had mapped the bays, named the real source of enclosures and bay positions,
   said "Empty" for an empty NVMe slot, did not offer locate lights on a view
