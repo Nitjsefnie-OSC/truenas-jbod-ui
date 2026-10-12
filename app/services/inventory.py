@@ -1316,6 +1316,8 @@ class InventoryService:
         self._view_order_context: tuple[Any, ...] | None = None
         self._cached_effective_view_order: list[str] = []
         self._canonical_options_request_sequence = 0
+        # Sources behind the current canonical options; None when unknown.
+        self._canonical_options_source_publication: SourcePublication | None = None
         self._snapshot_topology_generation = 0
         self._source_bundle_lock = asyncio.Lock()
         self._ssh_session_locks: dict[str, asyncio.Lock] = {}
@@ -1431,6 +1433,7 @@ class InventoryService:
         if previous._canonical_enclosure_options is not None:
             self._canonical_enclosure_options = dict(previous._canonical_enclosure_options)
             self._canonical_default_enclosure_id = previous._canonical_default_enclosure_id
+            self._canonical_options_source_publication = previous._canonical_options_source_publication
 
     def _metrics_labels(self) -> dict[str, str | None]:
         return {
@@ -1564,11 +1567,19 @@ class InventoryService:
                         or cache_key in self._snapshot_invalidated
                     ):
                         raise SnapshotStateBusyError()
+                    discovery_candidate = discovered_snapshot
+
                     def discovery_publication_is_current():
                         return (topology_generation == self._snapshot_topology_generation
                                 and cache_key not in self._snapshot_invalidated
                                 and self._snapshot_published_sequence.get(cache_key, -1) <= request_sequence
-                                and self._canonical_options_request_sequence <= request_sequence)
+                                and self._publication_not_superseded(
+                                    request_sequence,
+                                    discovery_candidate,
+                                    source_publications,
+                                    required_source_publication,
+                                    explicit_selection=False,
+                                ))
                     if (self._snapshot_has_trusted_topology(discovered_snapshot)
                             and discovery_publication_is_current()):
                         # Discovery details belong to this candidate, not merely
@@ -1583,6 +1594,7 @@ class InventoryService:
                         request_sequence=request_sequence,
                         source_publication=self._built_source_publication(source_publications),
                         minimum_source_publication=required_source_publication,
+                        build_source_publications=source_publications,
                     )
             finally:
                 self._finish_snapshot_activity(cache_key)
@@ -1691,6 +1703,7 @@ class InventoryService:
                             snapshot,
                             request_sequence=request_sequence,
                             default_selection=True,
+                            source_publications=source_publications,
                         )
                     self._snapshot_invalidated.add(cache_key)
                     raise UnknownEnclosureError()
@@ -1699,7 +1712,13 @@ class InventoryService:
             # the old key before taking the destination lock so opposite redirects
             # cannot deadlock. Request ordering prevents an older redirected build
             # from overwriting a newer explicit refresh that won the destination.
-            if request_sequence < self._canonical_options_request_sequence:
+            if not self._publication_not_superseded(
+                request_sequence,
+                snapshot,
+                source_publications,
+                required_source_publication,
+                explicit_selection=selected_enclosure_id is not None,
+            ):
                 current = self._current_snapshot_for_superseded_refresh(
                     publication_key,
                     request_sequence=request_sequence,
@@ -1725,12 +1744,20 @@ class InventoryService:
                         or publication_key in self._snapshot_invalidated
                     ):
                         raise SnapshotStateBusyError()
+                    candidate = snapshot
+
                     def publication_is_current():
                         return (topology_generation == self._snapshot_topology_generation
                                 and cache_key not in self._snapshot_invalidated
                                 and publication_key not in self._snapshot_invalidated
                                 and self._snapshot_published_sequence.get(publication_key, -1) <= request_sequence
-                                and self._canonical_options_request_sequence <= request_sequence)
+                                and self._publication_not_superseded(
+                                    request_sequence,
+                                    candidate,
+                                    source_publications,
+                                    required_source_publication,
+                                    explicit_selection=selected_enclosure_id is not None,
+                                ))
                     if publication_is_current():
                         # Observe only an eligible view while holding its actual
                         # destination lock. Retain every writer through caller
@@ -1745,12 +1772,15 @@ class InventoryService:
                         request_sequence=request_sequence,
                         source_publication=self._built_source_publication(source_publications),
                         minimum_source_publication=required_source_publication,
+                        build_source_publications=source_publications,
+                        explicit_selection=selected_enclosure_id is not None,
                     )
                     if published:
                         self._replace_canonical_options_from_trusted_snapshot(
                             snapshot,
                             request_sequence=request_sequence,
                             default_selection=selected_enclosure_id is None,
+                            source_publications=source_publications,
                         )
 
             finally:
@@ -1822,6 +1852,46 @@ class InventoryService:
             minimum,
         )
 
+    def _publication_not_superseded(
+        self,
+        request_sequence: int,
+        snapshot: InventorySnapshot | None,
+        build_source_publications: list[SourcePublication],
+        minimum_source_publication: SourcePublication | None,
+        *,
+        explicit_selection: bool,
+    ) -> bool:
+        """May this build publish although a newer request set the canonical options?
+
+        A build for an explicitly selected enclosure whose own sources are no
+        older than the ones behind the current canonical options, and that saw
+        the same enclosures, carries the same or newer bay and disk identity;
+        only its request number is older. A forced refresh overtaken by the
+        other enclosure's publication is then published instead of answering
+        busy. A build without a selection also decides the default enclosure,
+        which the older request may no longer change, so it stays superseded.
+        So does a build without a recorded source for either side, with a
+        different enclosure set, or with sources older than the request needs.
+        Topology changes and invalidated keys are checked by the callers.
+        """
+        if request_sequence >= self._canonical_options_request_sequence:
+            return True
+        canonical_sources = self._canonical_options_source_publication
+        if (
+            not explicit_selection
+            or snapshot is None
+            or canonical_sources is None
+            or not build_source_publications
+        ):
+            return False
+        built = build_source_publications[-1]
+        return (
+            self._source_publication_meets(built, canonical_sources)
+            and self._source_publication_meets(built, minimum_source_publication)
+            and self._canonical_enclosure_options is not None
+            and {option.id for option in snapshot.enclosures} == set(self._canonical_enclosure_options)
+        )
+
     def _current_snapshot_for_superseded_refresh(
         self,
         cache_key: str,
@@ -1863,6 +1933,8 @@ class InventoryService:
         request_sequence: int,
         source_publication: SourcePublication,
         minimum_source_publication: SourcePublication | None,
+        build_source_publications: list[SourcePublication] | None = None,
+        explicit_selection: bool = False,
     ) -> tuple[InventorySnapshot, bool]:
         if self._snapshot_published_sequence.get(cache_key, -1) > request_sequence:
             current = self._cache.get(cache_key)
@@ -1873,7 +1945,13 @@ class InventoryService:
                 self._touch_snapshot_key(cache_key)
                 return current, False
             raise SnapshotStateBusyError()
-        if request_sequence < self._canonical_options_request_sequence:
+        if not self._publication_not_superseded(
+            request_sequence,
+            snapshot,
+            build_source_publications or [],
+            minimum_source_publication,
+            explicit_selection=explicit_selection,
+        ):
             # Another request published trusted topology after this build began.
             # Reuse a still-valid public value without publishing this candidate;
             # otherwise canonical retirement or LRU must continue to fail closed.
@@ -2035,6 +2113,9 @@ class InventoryService:
                         else next(iter(options), None)
                     )
                     self._canonical_options_request_sequence = request_sequence
+                    self._canonical_options_source_publication = (
+                        source_publications[-1] if source_publications else None
+                    )
                     if not trusted_topology:
                         discovered_snapshot = None
         if selected_enclosure_id is None:
@@ -2079,6 +2160,7 @@ class InventoryService:
         *,
         request_sequence: int,
         default_selection: bool,
+        source_publications: list[SourcePublication] | None = None,
     ) -> bool:
         if request_sequence < self._canonical_options_request_sequence:
             return False
@@ -2096,6 +2178,7 @@ class InventoryService:
         elif default_selection or self._canonical_default_enclosure_id not in options:
             self._canonical_default_enclosure_id = next(iter(options), None)
         self._canonical_options_request_sequence = request_sequence
+        self._canonical_options_source_publication = source_publications[-1] if source_publications else None
         for key in removed_keys:
             self._remove_snapshot_state_key(key, cancel_task=True)
         self._forget_led_targets(removed_keys, request_sequence=request_sequence)
@@ -3484,6 +3567,7 @@ class InventoryService:
             snapshot_keys_to_remove = self._snapshot_state_keys()
             self._canonical_enclosure_options = None
             self._canonical_default_enclosure_id = None
+            self._canonical_options_source_publication = None
             self._snapshot_topology_generation += 1
             with self._smart_persistence_lock:
                 self._smart_cache_global_generation += 1

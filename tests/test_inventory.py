@@ -16858,16 +16858,33 @@ class InventoryServiceMutationRefreshTests(unittest.IsolatedAsyncioTestCase):
         service._touch_snapshot_key("enc-a")
         return service, public_a
 
-    async def _race_a_against_b(self, service, template, request_a, *, on_a_started=None):
-        """Run request_a; while its A build waits, a newer enclosure-B refresh publishes."""
+    async def _race_a_against_b(
+        self, service, template, request_a, *, on_a_started=None,
+        a_sources=None, b_sources=None, b_enclosures=None,
+    ):
+        """Run request_a; while its A build waits, a newer enclosure-B refresh publishes.
+
+        ``a_sources`` / ``b_sources`` are the source publications each build
+        read, as the real source-bundle collection records them.
+        """
         a_builds = 0
         started = asyncio.Event()
         gate = asyncio.Event()
 
+        def record(publication):
+            publications = inventory_module._snapshot_build_source_publications.get()
+            if publication is not None and publications is not None:
+                publications.append(publication)
+
         async def build_snapshot(selected_enclosure_id=None, *, force_source_refresh=False):
             nonlocal a_builds
             if selected_enclosure_id == "enc-b":
-                return template.model_copy(update={"selected_enclosure_id": "enc-b", "warnings": ["B"]})
+                record(b_sources)
+                update = {"selected_enclosure_id": "enc-b", "warnings": ["B"]}
+                if b_enclosures is not None:
+                    update["enclosures"] = b_enclosures
+                return template.model_copy(update=update)
+            record(a_sources)
             a_builds += 1
             started.set()
             await gate.wait()
@@ -16899,6 +16916,78 @@ class InventoryServiceMutationRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(result, inventory_module.SnapshotStateBusyError)
             self.assertEqual(a_builds, 1)
             self.assertIs(service._cache["enc-a"], public_a)
+
+    async def test_superseded_forced_refresh_returns_its_own_build_when_its_sources_are_current(self) -> None:
+        # The forced build of A collected its sources after the click. While
+        # it was still correlating, a newer request published B from those
+        # same sources. A's build is as new as the topology that superseded
+        # it, so it is published and returned instead of answering busy.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, public_a = self._superseded_service(temp_dir, public_a_expired=True)
+            fresh = inventory_module.SourcePublication(sequence=1, sg_cache_generation=1)
+            result, a_builds = await self._race_a_against_b(
+                service,
+                public_a,
+                lambda: service.get_snapshot(force_refresh=True, selected_enclosure_id="enc-a"),
+                a_sources=fresh,
+                b_sources=fresh,
+            )
+            self.assertNotIsInstance(result, Exception)
+            self.assertEqual(result.warnings, ["A 1"])
+            self.assertEqual(a_builds, 1)
+            self.assertIs(service._cache["enc-a"], result)
+            # The older request never takes the canonical options back.
+            self.assertEqual(service._cache["enc-b"].warnings, ["B"])
+
+    async def test_superseded_forced_refresh_still_fails_closed_when_its_build_is_older(self) -> None:
+        # Fail closed when the superseding publication read newer sources, or
+        # saw a different set of enclosures (a shelf added or retired).
+        cases = {
+            "older sources": {
+                "a_sources": inventory_module.SourcePublication(sequence=1, sg_cache_generation=1),
+                "b_sources": inventory_module.SourcePublication(sequence=2, sg_cache_generation=2),
+            },
+            "different enclosures": {
+                "a_sources": inventory_module.SourcePublication(sequence=1, sg_cache_generation=1),
+                "b_sources": inventory_module.SourcePublication(sequence=1, sg_cache_generation=1),
+                "b_enclosures": [
+                    EnclosureOption(id="enc-a", label="Shelf A"),
+                    EnclosureOption(id="enc-b", label="Shelf B"),
+                    EnclosureOption(id="enc-c", label="Shelf C"),
+                ],
+            },
+        }
+        for name, race in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temp_dir:
+                service, public_a = self._superseded_service(temp_dir, public_a_expired=True)
+                result, a_builds = await self._race_a_against_b(
+                    service,
+                    public_a,
+                    lambda: service.get_snapshot(force_refresh=True, selected_enclosure_id="enc-a"),
+                    **race,
+                )
+                self.assertIsInstance(result, inventory_module.SnapshotStateBusyError)
+                self.assertEqual(a_builds, 1)
+                self.assertIs(service._cache["enc-a"], public_a)
+
+    async def test_superseded_default_selection_refresh_still_fails_closed(self) -> None:
+        # A build without an explicit enclosure decides the default. If an
+        # older one published, the newer canonical options would keep the old
+        # default, so only explicit selections are let through.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, public_a = self._superseded_service(temp_dir, public_a_expired=True)
+            fresh = inventory_module.SourcePublication(sequence=1, sg_cache_generation=1)
+            result, a_builds = await self._race_a_against_b(
+                service,
+                public_a,
+                lambda: service.get_snapshot(force_refresh=True),
+                a_sources=fresh,
+                b_sources=fresh,
+            )
+            self.assertIsInstance(result, inventory_module.SnapshotStateBusyError)
+            self.assertEqual(a_builds, 1)
+            self.assertIs(service._cache["enc-a"], public_a)
+            self.assertEqual(service._canonical_default_enclosure_id, "enc-a")
 
     async def test_superseded_ordinary_refresh_does_not_return_an_expired_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
