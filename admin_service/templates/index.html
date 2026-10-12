@@ -659,9 +659,10 @@
                   <span>Or a key file</span>
                   <input id="setup-bootstrap-key-path" data-ssh-field data-bootstrap-field type="text" placeholder="Optional instead of a password, for example /run/ssh/id_installer">
                 </label>
-                <label class="field">
-                  <span>Sudo password (leave blank)</span>
-                  <input id="setup-bootstrap-sudo-password" data-ssh-field data-bootstrap-field type="password" placeholder="Leave blank: use root or a login with passwordless sudo">
+                <label id="setup-bootstrap-service-home-field" class="field">
+                  <span>Home directory</span>
+                  <input id="setup-bootstrap-service-home" data-ssh-field data-bootstrap-field type="text" placeholder="/mnt/tank/home/jbodmap" aria-describedby="setup-bootstrap-service-home-help" autocomplete="off" spellcheck="false">
+                  <small id="setup-bootstrap-service-home-help" class="subtle">Only used when the app's user doesn't exist yet. Must be a folder on a pool, for example /mnt/tank/home/jbodmap.</small>
                 </label>
                 <label class="toggle">
                   <input id="setup-bootstrap-install-sudo" data-ssh-field data-bootstrap-field type="checkbox" checked>

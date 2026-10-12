@@ -96,7 +96,7 @@ function fixture(selection = "custom-a", running = true) {
     "setup-ssh-commands": "  command-one\ncommand-two  ",
     "setup-bootstrap-host": "  bootstrap.example.test  ", "setup-bootstrap-user": "  bootstrap-user  ",
     "setup-bootstrap-password": "  SYNTHETIC-BOOTSTRAP  ",
-    "setup-bootstrap-sudo-password": "  SYNTHETIC-BOOTSTRAP-SUDO  ",
+    "setup-bootstrap-service-home": "  /mnt/tank/home/raw-home  ",
     "setup-bmc-host": "  bmc.example.test  ", "setup-bmc-username": "  bmc-user  ",
     "setup-bmc-password": "  SYNTHETIC-BMC  ", "setup-bmc-timeout-seconds": "0030",
     "setup-profile": "", "profile-builder-ordering": "source-layout",

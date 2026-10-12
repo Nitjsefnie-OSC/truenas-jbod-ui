@@ -286,12 +286,15 @@ writes these entries to sudoers. Inside a regex that breaks an interval such as
 check each app command as the service user, for example
 `sudo -n -l /usr/local/sbin/smartctl -x -j /dev/da0`.
 
-The admin bootstrap does not create the CORE account. Create it first in the
-CORE web UI under Accounts > Users with a home directory under `/mnt`, shell
-`sh`, Disable Password on and the app's SSH public key pasted in. Bootstrap then
-looks the account up through the middleware, installs the key and applies this
-list. If the account is missing or its home directory is not under `/mnt`,
-bootstrap stops before changing anything.
+The admin bootstrap looks the CORE account up through the middleware. If it is
+missing and **Home directory** is filled in with a folder on a pool (for example
+`/mnt/tank/home/jbodmap`), bootstrap creates it with one `midclt call
+user.create` (shell `sh`, password disabled, SMB off, the app's SSH key). It then
+installs the key and applies this list. Or create the account yourself in
+Accounts > Users with a home directory under `/mnt`, shell `sh`, Disable
+Password on and the app's SSH public key. An existing account keeps its home.
+If the account is missing and Home directory is blank, or its home is not under
+`/mnt`, bootstrap stops before changing anything.
 
 ```bash
 midclt call user.update USER_ID '{"sudo":true,"sudo_nopasswd":true,"sudo_commands":["/usr/sbin/sesutil map","/usr/sbin/sesutil show","/sbin/camcontrol devlist -v","/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ on$","/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ off$","/usr/local/sbin/smartctl ^-x -j /dev/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?$","/usr/local/sbin/smartctl ^-x /dev/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?$","/usr/sbin/mprutil show adapter","/usr/sbin/mprutil show adapters","/usr/sbin/mprutil show all","/usr/sbin/mprutil show devices","/usr/sbin/mprutil show enclosures","/usr/sbin/mprutil show expanders","/usr/sbin/mprutil show iocfacts","/usr/sbin/mprutil ^-u [0-9]+ show adapter$","/usr/sbin/mprutil ^-u [0-9]+ show all$","/usr/sbin/mprutil ^-u [0-9]+ show devices$","/usr/sbin/mprutil ^-u [0-9]+ show enclosures$","/usr/sbin/mprutil ^-u [0-9]+ show expanders$","/usr/sbin/mprutil ^-u [0-9]+ show iocfacts$","/usr/local/sbin/dmidecode -t slot","/usr/bin/tail -n 4000 /var/log/messages","/usr/local/bin/midclt call disk.multipath_sync","/usr/local/bin/midclt call disk.sync_all","/usr/local/bin/midclt ^call core\\.get_jobs \\[\\[\\\"id\\\"\\,\\\"=\\\"\\,[0-9]+\\]\\]$"]}'

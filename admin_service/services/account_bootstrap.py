@@ -27,6 +27,18 @@ CORE_SERVICE_HOME_HELP = (
     "with a home directory under /mnt, shell sh, Disable Password on and this app's "
     "SSH public key pasted in"
 )
+CORE_SERVICE_HOME_EXAMPLE = "/mnt/tank/home/jbodmap"
+CORE_SERVICE_HOME_FIELD_HELP = (
+    f"fill in Home directory with a folder on a pool, for example {CORE_SERVICE_HOME_EXAMPLE}, "
+    "and setup creates the account"
+)
+CORE_SERVICE_HOME_INVALID_DETAIL = (
+    f"Home directory must be a folder on a pool, for example {CORE_SERVICE_HOME_EXAMPLE}. "
+    "Use a path under /mnt/<pool>/ made of letters, digits, '_', '.', '-' and '/' only, "
+    "with no '.' or '..' parts."
+)
+CORE_SERVICE_HOME_SEGMENT = re.compile(r"[A-Za-z0-9_.-]+")
+CORE_SERVICE_ACCOUNT_FULL_NAME = "TrueNAS JBOD UI service account"
 ESXI_BOOTSTRAP_UNSUPPORTED_DETAIL = (
     "VMware ESXi does not use the Linux one-time bootstrap or sudoers flow. "
     "Save the SSH host, root or key-based auth, and the read-only runtime commands directly instead."
@@ -226,6 +238,8 @@ class ServiceAccountBootstrapService:
         if requires_sudo and payload.bootstrap_sudo_password:
             # The script travels on stdin, which a piped sudo password would share.
             raise ValueError(BOOTSTRAP_SUDO_PASSWORD_UNSUPPORTED_DETAIL)
+        # Refuse a bad CORE home before anything connects to the host.
+        self._core_service_home(payload)
         public_key, key_source = self._resolve_public_key(payload)
         ssh_config = SSHConfig(
             enabled=True,
@@ -251,6 +265,12 @@ class ServiceAccountBootstrapService:
         details = self._parse_output(result.stdout)
         sudo_verified = details.get("sudo_rules_installed") == "1"
         policy_unverified = payload.install_sudo_rules and not sudo_verified
+        account_created = details.get("account_created") == "1"
+        provisioned = (
+            f"Created {payload.service_user} on {payload.host} through the TrueNAS middleware"
+            if account_created
+            else f"Provisioned {payload.service_user} on {payload.host}"
+        )
         return {
             "ok": not policy_unverified,
             "host": payload.host,
@@ -260,11 +280,12 @@ class ServiceAccountBootstrapService:
             "service_home": details.get("service_home"),
             "authorized_keys_path": details.get("authorized_keys_path"),
             "sudo_rules_installed": payload.install_sudo_rules and sudo_verified,
+            "account_created": account_created,
             "sudoers_path": details.get("sudoers_path"),
             "permission_target": details.get("permission_target") or details.get("sudoers_path"),
             "key_source": key_source,
             "detail": (
-                f"Provisioned {payload.service_user} on {payload.host} using one-time setup credentials. "
+                f"{provisioned} using one-time setup credentials. "
                 "Those bootstrap credentials were used only for this action and were not written to config.yaml."
                 if not policy_unverified else
                 "The requested sudo policy installation could not be verified. Account setup may have completed."
@@ -316,6 +337,32 @@ class ServiceAccountBootstrapService:
                 continue
         raise ValueError("The selected SSH key path does not contain a supported private key.")
 
+    @staticmethod
+    def _core_service_home(payload: SystemSetupBootstrapRequest) -> str | None:
+        """Return the validated CORE home for a new account, or None when unset.
+
+        The middleware only keeps SSH keys for homes under /mnt and refuses a
+        home that is not on a pool. Bootstrap also refuses the pool root itself
+        and anything outside a conservative character set, so the value is safe
+        to hand to `user.create` (#947). Other platforms ignore the field.
+        """
+        if payload.platform != "core":
+            return None
+        home = normalize_text(payload.service_home)
+        if not home:
+            return None
+        if home.endswith("/"):
+            home = home[:-1]
+        if not home.startswith("/mnt/"):
+            raise ValueError(CORE_SERVICE_HOME_INVALID_DETAIL)
+        segments = home[len("/mnt/"):].split("/")
+        if len(segments) < 2:
+            raise ValueError(CORE_SERVICE_HOME_INVALID_DETAIL)
+        for segment in segments:
+            if segment in {".", ".."} or not CORE_SERVICE_HOME_SEGMENT.fullmatch(segment):
+                raise ValueError(CORE_SERVICE_HOME_INVALID_DETAIL)
+        return home
+
     def _build_bootstrap_command(self, payload: SystemSetupBootstrapRequest) -> str:
         # sshd hands this string to the login user's shell, which is csh for root
         # on TrueNAS CORE. Keep it one line with no quoting; the script itself
@@ -344,7 +391,15 @@ class ServiceAccountBootstrapService:
             else ""
         )
         if payload.platform == "core":
-            account_lines = self._core_account_lookup_script()
+            service_home = self._core_service_home(payload)
+            account_lines = self._core_account_lookup_script(
+                self._build_core_midclt_user_create_payload(
+                    service_user, service_shell, service_home, public_key
+                )
+                if service_home
+                else None,
+                service_home,
+            )
         else:
             account_lines = [
                 "if id \"$svc_user\" >/dev/null 2>&1; then",
@@ -405,6 +460,8 @@ class ServiceAccountBootstrapService:
             "printf 'BOOTSTRAP_SUDO_RULES_INSTALLED=%s\\n' \"$install_sudo\"",
             ]
         )
+        if payload.platform == "core":
+            script_lines.append("printf 'BOOTSTRAP_ACCOUNT_CREATED=%s\\n' \"$account_created\"")
         # `/bin/sh -s` reads this script from stdin. The shell parses the whole
         # function before running it, and the body's own stdin is /dev/null, so
         # no command it runs can read the rest of the script as its input.
@@ -423,21 +480,8 @@ class ServiceAccountBootstrapService:
         )
 
     @staticmethod
-    def _core_account_lookup_script() -> list[str]:
-        """Resolve the CORE middleware account before anything on the host changes.
-
-        TrueNAS CORE regenerates /etc/master.passwd from the middleware, so an
-        account made with `pw useradd` disappears and cannot be granted sudo
-        through `user.update` (#947). The operator creates the account in the
-        web UI; bootstrap only installs the key and applies the grants.
-        """
-        nothing_changed = "Nothing was changed on the host."
+    def _core_account_query_lines() -> list[str]:
         return [
-            "if ! command -v midclt >/dev/null 2>&1; then",
-            f"  echo \"TrueNAS CORE midclt was not found on the remote host. {nothing_changed}\" >&2",
-            "  exit 1",
-            "fi",
-            "svc_query=$(printf '[[\"username\",\"=\",\"%s\"]]' \"$svc_user\")",
             "svc_user_json=$(midclt call user.query \"$svc_query\" '{\"select\":[\"id\",\"username\",\"home\"]}')",
             (
                 "svc_id=$(printf '%s\\n' \"$svc_user_json\" | "
@@ -447,13 +491,63 @@ class ServiceAccountBootstrapService:
                 "home_dir=$(printf '%s\\n' \"$svc_user_json\" | "
                 "sed -n 's/.*\"home\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' | head -n1)"
             ),
-            "if [ -z \"$svc_id\" ]; then",
-            (
-                "  echo \"The TrueNAS CORE account $svc_user does not exist. "
-                f"{nothing_changed} Create it in the CORE web UI under Accounts > Users "
-                f"{CORE_SERVICE_HOME_HELP}, then run this setup again.\" >&2"
-            ),
+        ]
+
+    @classmethod
+    def _core_account_lookup_script(
+        cls,
+        create_payload: str | None = None,
+        service_home: str | None = None,
+    ) -> list[str]:
+        """Resolve the CORE middleware account before anything on the host changes.
+
+        TrueNAS CORE regenerates /etc/master.passwd from the middleware, so an
+        account made with `pw useradd` disappears and cannot be granted sudo
+        through `user.update` (#947). A missing account is created with one
+        `user.create` call when the operator gave a home on a pool; otherwise
+        bootstrap stops and asks for one. An existing account keeps its home.
+        """
+        nothing_changed = "Nothing was changed on the host."
+        if create_payload and service_home:
+            missing_lines = [
+                f"  create_payload={shlex.quote(create_payload)}",
+                "  if ! create_output=$(midclt call user.create \"$create_payload\" 2>&1); then",
+                (
+                    "    echo \"TrueNAS CORE could not create the account $svc_user with home directory "
+                    f"{service_home}: $create_output\" >&2"
+                ),
+                "    exit 1",
+                "  fi",
+                "  account_created=1",
+                *(f"  {line}" for line in cls._core_account_query_lines()),
+                "  if [ -z \"$svc_id\" ]; then",
+                (
+                    "    echo \"TrueNAS CORE reported creating $svc_user, but the account was not found "
+                    "afterwards. Check Accounts > Users, then run this setup again.\" >&2"
+                ),
+                "    exit 1",
+                "  fi",
+            ]
+        else:
+            missing_lines = [
+                (
+                    "  echo \"The TrueNAS CORE account $svc_user does not exist. "
+                    f"{nothing_changed} To create it, {CORE_SERVICE_HOME_FIELD_HELP}. Or create it "
+                    f"in the CORE web UI under Accounts > Users {CORE_SERVICE_HOME_HELP}. "
+                    "Then run this setup again.\" >&2"
+                ),
+                "  exit 1",
+            ]
+        return [
+            "if ! command -v midclt >/dev/null 2>&1; then",
+            f"  echo \"TrueNAS CORE midclt was not found on the remote host. {nothing_changed}\" >&2",
             "  exit 1",
+            "fi",
+            "account_created=0",
+            "svc_query=$(printf '[[\"username\",\"=\",\"%s\"]]' \"$svc_user\")",
+            *cls._core_account_query_lines(),
+            "if [ -z \"$svc_id\" ]; then",
+            *missing_lines,
             "fi",
             "pool_root=/mnt",
             "case \"$home_dir\" in",
@@ -469,7 +563,6 @@ class ServiceAccountBootstrapService:
             "    ;;",
             "esac",
         ]
-
 
     @classmethod
     def _linux_sudo_policy_script(cls, service_user: str, sudoers_content: str) -> str:
@@ -588,8 +681,8 @@ class ServiceAccountBootstrapService:
                 "path_candidates": [],
                 "detail": (
                     "TrueNAS CORE bootstrap runs this same one-line middleware command after resolving "
-                    f"USER_ID for {service_user} on the host. Create {service_user} first in "
-                    f"Accounts > Users {CORE_SERVICE_HOME_HELP}."
+                    f"USER_ID for {service_user} on the host. If {service_user} does not exist yet, "
+                    f"{CORE_SERVICE_HOME_FIELD_HELP} first."
                 ),
                 "content": cls._build_core_midclt_user_update_command(
                     "USER_ID",
@@ -642,6 +735,34 @@ class ServiceAccountBootstrapService:
                 "sudo": True,
                 "sudo_nopasswd": True,
                 "sudo_commands": list(cls._resolve_sudo_commands("core", requested_commands)),
+            },
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _build_core_midclt_user_create_payload(
+        service_user: str,
+        service_shell: str,
+        service_home: str,
+        public_key: str,
+    ) -> str:
+        """JSON for one `midclt call user.create` of a missing CORE account.
+
+        The middleware makes the home with ``home_mode``, owns it and writes
+        authorized_keys from ``sshpubkey``. No password is sent; the account
+        logs in by key only. Grants are added afterwards by `user.update`.
+        """
+        return json.dumps(
+            {
+                "username": service_user,
+                "full_name": CORE_SERVICE_ACCOUNT_FULL_NAME,
+                "group_create": True,
+                "home": service_home,
+                "home_mode": "700",
+                "shell": service_shell,
+                "password_disabled": True,
+                "smb": False,
+                "sshpubkey": public_key,
             },
             separators=(",", ":"),
         )
@@ -794,4 +915,6 @@ class ServiceAccountBootstrapService:
                 parsed["sudo_rules_installed"] = line.split("=", 1)[1].strip()
             elif line.startswith("BOOTSTRAP_PERMISSION_TARGET="):
                 parsed["permission_target"] = line.split("=", 1)[1].strip()
+            elif line.startswith("BOOTSTRAP_ACCOUNT_CREATED="):
+                parsed["account_created"] = line.split("=", 1)[1].strip()
         return parsed

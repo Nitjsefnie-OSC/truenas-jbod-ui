@@ -18,10 +18,16 @@ function declaration(name) {
   return SOURCE.slice(start, start + 1 + next);
 }
 
-function fixture(platform, { ssh = true, enabled = true, forceEnabled = false } = {}) {
+function fixture(platform, { ssh = true, enabled = true, forceEnabled = false, serviceHome = "" } = {}) {
   const field = (value = "") => ({ value, checked: true, disabled: false, textContent: "", classList: { toggle() {} } });
+  const hideable = (value = "") => {
+    const hidden = new Set();
+    return { ...field(value), hidden, classList: { toggle(name, force) { if (force) hidden.add(name); else hidden.delete(name); }, contains: (name) => hidden.has(name) } };
+  };
   const elements = {
     setupSshEnabled: { checked: ssh },
+    setupBootstrapServiceHome: field(serviceHome),
+    setupBootstrapServiceHomeField: hideable(),
     setupBootstrapEnabled: { checked: enabled },
     setupBootstrapInstallSudo: field(),
     setupBootstrapFields: field(),
@@ -134,3 +140,50 @@ for (const platform of ["linux", "core", "scale", "quantastor"]) {
     assert.throws(() => context.collectBootstrapPayload(), /Enable One-Time Bootstrap/);
   });
 }
+
+// #947: CORE bootstrap can create the missing service account through the middleware.
+test("core: the Home directory field shows and its trimmed value is sent as service_home", () => {
+  const { context, elements } = fixture("core", { serviceHome: "  /mnt/tank/home/jbodmap  " });
+  context.syncBootstrapFields();
+  assert.equal(elements.setupBootstrapServiceHomeField.classList.contains("hidden"), false);
+  const payload = context.collectBootstrapPayload();
+  assert.equal(payload.service_home, "/mnt/tank/home/jbodmap");
+});
+
+test("core: a blank Home directory is sent as null", () => {
+  const { context } = fixture("core");
+  context.syncBootstrapFields();
+  assert.equal(context.collectBootstrapPayload().service_home, null);
+});
+
+for (const platform of ["linux", "scale", "quantastor", "esxi", "ipmi"]) {
+  test(`${platform}: the CORE-only Home directory field is hidden and never sent`, () => {
+    const { context, elements } = fixture(platform, { serviceHome: "/mnt/tank/home/jbodmap", forceEnabled: true });
+    context.syncBootstrapFields();
+    assert.equal(elements.setupBootstrapServiceHomeField.classList.contains("hidden"), true);
+    if (platform === "esxi" || platform === "ipmi") return;
+    assert.equal(context.collectBootstrapPayload().service_home, null);
+  });
+}
+
+for (const platform of ["linux", "core", "scale", "quantastor"]) {
+  test(`${platform}: bootstrap never sends a sudo password`, () => {
+    const { context } = fixture(platform);
+    context.syncBootstrapFields();
+    const payload = context.collectBootstrapPayload();
+    assert.equal(Object.hasOwn(payload, "bootstrap_sudo_password"), false);
+  });
+}
+
+test("the bootstrap code no longer reads a bootstrap sudo-password input", () => {
+  assert.doesNotMatch(SOURCE, /setupBootstrapSudoPassword|setup-bootstrap-sudo-password|bootstrap_sudo_password/);
+});
+
+test("CORE bootstrap copy says setup creates the user when Home directory is filled in", () => {
+  const copy = SOURCE.match(/platform === "core"\s*\?\s*"([^"]*)"/);
+  assert.ok(copy, "missing the CORE bootstrap copy");
+  assert.match(copy[1], /Home directory/);
+  assert.match(copy[1], /creates/);
+  assert.match(copy[1], /\/mnt/);
+  assert.doesNotMatch(copy[1], /^Create the app's user in the CORE web UI first/);
+});

@@ -80,11 +80,14 @@ For dual-path SAS systems, you can also add:
     - sudo -n /sbin/camcontrol devlist -v
 ```
 
-Create the service account in the CORE web UI first (Accounts > Users): home
-directory under `/mnt`, shell `sh`, Disable Password on, and the app's SSH
-public key pasted in. The admin's one-time bootstrap installs the key and grants
-for that existing account; it does not create CORE accounts and stops before
-any change when the account is missing.
+The admin's one-time bootstrap can create the service account. Fill in **Home
+directory** with a folder on a pool, for example `/mnt/tank/home/jbodmap`, and
+bootstrap creates the account through the TrueNAS middleware (`user.create`:
+shell `sh`, no password, no SMB, the app's SSH key), then applies the grants.
+Leave it blank to use an account you made yourself in Accounts > Users (home
+under `/mnt`, shell `sh`, Disable Password on, the app's public key). An existing
+account keeps its home. If the account is missing and Home directory is blank,
+bootstrap stops before any change.
 
 Use the complete generated CORE policy in
 [[SSH Setup and Sudo|SSH-Setup-and-Sudo]]. It includes the bounded bootstrap
