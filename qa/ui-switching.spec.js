@@ -65,15 +65,20 @@ async function setAutoRefresh(page, enabled) {
   }
 }
 
+// A system switch can end in a nested "opening-view" run when the system
+// opens on a different live enclosure (#933); either run settles the switch.
+const SYSTEM_SWITCH_REASONS = ["system-switch", "opening-view"];
+
 async function waitForRefreshToSettle(page, reason, previousRunId = null) {
   if (await uiPerfEnabled(page)) {
+    const reasons = Array.isArray(reason) ? reason : [reason];
     await page.waitForFunction(
-      ([expectedReason, previousId]) => {
+      ([expectedReasons, previousId]) => {
         const latest = window.__JBOD_UI_PERF?.recentRuns?.[0];
-        return Boolean(latest && latest.reason === expectedReason && latest.status === "done"
+        return Boolean(latest && expectedReasons.includes(latest.reason) && latest.status === "done"
           && latest.id !== previousId && latest.systemId === document.getElementById("system-select").value);
       },
-      [reason, previousRunId],
+      [reasons, previousRunId],
       { timeout: SYSTEM_SETTLE_TIMEOUT_MS }
     );
   }
@@ -87,7 +92,7 @@ async function switchSelect(page, selector, value, reason = null) {
 }
 
 async function switchSystem(page, value) {
-  await switchSelect(page, "#system-select", value, "system-switch");
+  await switchSelect(page, "#system-select", value, SYSTEM_SWITCH_REASONS);
 }
 
 async function switchEnclosure(page, value) {
@@ -550,7 +555,7 @@ test.describe("browser qa smoke", () => {
     if (await uiPerfEnabled(page)) {
       const latest = await latestUiPerfRun(page);
       if (latest) {
-        expect(latest.reason).toBe("system-switch");
+        expect(SYSTEM_SWITCH_REASONS).toContain(latest.reason);
         expect(latest.status).toBe("done");
       }
     }
@@ -625,7 +630,7 @@ test.describe("browser qa smoke", () => {
     const recentReasons = await page.evaluate(() =>
       (window.__JBOD_UI_PERF?.recentRuns || []).map((run) => run.reason)
     );
-    expect(recentReasons[0]).toBe("system-switch");
+    expect(SYSTEM_SWITCH_REASONS).toContain(recentReasons[0]);
     expect(recentReasons).not.toContain("auto-refresh");
   });
 

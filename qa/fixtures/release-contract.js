@@ -49,8 +49,16 @@ const secondSystemDefaultViewRuntime = {
   default_selection: "view:second-chassis",
 };
 
+// A second system whose saved opening order starts on its other live shelf.
+const secondSystemDefaultEnclosureRuntime = {
+  system_id: "synthetic-second", system_label: "Second System", views: [],
+  view_order: ["enclosure:enc-b", "enclosure:enc-a"],
+  default_selection: "enclosure:enc-b",
+};
+
 async function installFixture(page, html, {
   timing = false, esxi = "fat-twin", emptyInventory = false, secondSystemDefaultView = false,
+  secondSystemDefaultEnclosure = false,
 } = {}) {
   const diagnostics = { errors: [], warnings: [], unexpected: [], inventory: [], runtime: [] };
   const controls = { holdInventory: null, holdRuntime: null };
@@ -136,7 +144,8 @@ async function installFixture(page, html, {
       if (controls.holdRuntime) await controls.holdRuntime(url);
       payload = systemId === "synthetic-system" ? runtime
         : secondSystemDefaultView && systemId === "synthetic-second" ? secondSystemDefaultViewRuntime
-          : { system_id: systemId, views: [] };
+          : secondSystemDefaultEnclosure && systemId === "synthetic-second" ? secondSystemDefaultEnclosureRuntime
+            : { system_id: systemId, views: [] };
     } else if (url.pathname === "/api/history/status") {
       payload = { configured: false, available: false };
     } else if (/^\/api\/(?:slots|storage-views\/[^/]+\/slots)\/(?:\d+\/smart|smart-batch)$/.test(url.pathname)) {
