@@ -125,3 +125,79 @@ test("a passive M.2 carrier view shows on the main page with auto binding on eve
     assert.deepEqual(view.layout_overrides.slot_labels, { 0: "M2-1", 1: "M2-2" }, platform);
   }
 });
+
+// Codex review on #963: a view keeps the binding of the platform it was added
+// on, so changing the Platform field must move untouched template defaults.
+function loadWithViews(views, platformRef) {
+  const state = { storageViewTemplates: [AOC_TEMPLATE, PASSIVE_TEMPLATE], storageViews: [] };
+  const context = vm.createContext({ console, state, currentSetupPlatform: () => platformRef.value });
+  vm.runInContext(
+    `${SNIPPETS.join("\n")}\nglobalThis.__tested = { createStorageViewFromTemplate, syncStorageViewPlatformBindings };`,
+    context,
+    { filename: "admin.js" }
+  );
+  const tested = context.__tested;
+  for (const { templateId, edit } of views) {
+    const view = tested.createStorageViewFromTemplate(templateId);
+    if (edit) {
+      edit(view);
+    }
+    state.storageViews.push(view);
+  }
+  return { state, sync: tested.syncStorageViewPlatformBindings };
+}
+
+function plain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+test("switching an untouched AOC view from ESXi to CORE drops the ESXi member IDs", () => {
+  const platform = { value: "esxi" };
+  const { state, sync } = loadWithViews([{ templateId: "aoc-slg4-2h8m2-2" }], platform);
+  assert.deepEqual(plain(state.storageViews[0].binding.device_names), ["13:0", "13:1"]);
+
+  platform.value = "core";
+  assert.equal(sync(), true);
+
+  const binding = plain(state.storageViews[0].binding);
+  assert.equal(binding.mode, "hybrid");
+  assert.deepEqual([...binding.device_names, ...binding.pcie_addresses], []);
+});
+
+test("switching an untouched AOC view from SCALE to ESXi adds the ESXi member IDs", () => {
+  const platform = { value: "scale" };
+  const { state, sync } = loadWithViews([{ templateId: "aoc-slg4-2h8m2-2" }], platform);
+
+  platform.value = "esxi";
+  assert.equal(sync(), true);
+
+  assert.deepEqual(plain(state.storageViews[0].binding.device_names), ["13:0", "13:1"]);
+  assert.deepEqual(plain(state.storageViews[0].binding.pcie_addresses), ["C0 x4", "C1 x4"]);
+  state.storageViews[0].binding.device_names.push("13:2");
+  assert.deepEqual(AOC_TEMPLATE.platform_binding_defaults.esxi.device_names, ["13:0", "13:1"]);
+});
+
+test("a platform change keeps bindings the operator edited, generated views, and other templates", () => {
+  const platform = { value: "core" };
+  const { state, sync } = loadWithViews(
+    [
+      { templateId: "aoc-slg4-2h8m2-2", edit: (view) => { view.binding.device_names = ["nvd0", "nvd1"]; } },
+      { templateId: "aoc-slg4-2h8m2-2", edit: (view) => { view.generated = true; } },
+      { templateId: "m2-carrier-passive-2" },
+    ],
+    platform
+  );
+  const before = plain(state.storageViews);
+
+  platform.value = "esxi";
+  assert.equal(sync(), false);
+
+  assert.deepEqual(plain(state.storageViews), before);
+});
+
+test("the Platform change handler moves template bindings before it redraws the views", () => {
+  const handler = sourceBetween('    elements.setupPlatform?.addEventListener("change", () => {', "\n    });");
+  const syncAt = handler.indexOf("syncStorageViewPlatformBindings()");
+  assert.notEqual(syncAt, -1);
+  assert.ok(syncAt < handler.indexOf("renderStorageViews()"));
+});

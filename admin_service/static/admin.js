@@ -2970,6 +2970,32 @@
     );
   }
 
+  function syncStorageViewPlatformBindings() {
+    // A view still on one of its template's starting bindings follows the
+    // Platform field; a binding the operator edited is left alone (#951).
+    let changed = false;
+    const bindingKey = (storageView, binding) =>
+      JSON.stringify(normalizeStorageView({ template_id: storageView.template_id, binding }).binding);
+    state.storageViews.forEach((storageView) => {
+      const template = getStorageViewTemplate(storageView?.template_id);
+      const platformDefaults = template?.platform_binding_defaults || {};
+      if (storageView?.generated || !Object.keys(platformDefaults).length) {
+        return;
+      }
+      const startingKeys = [template.default_binding || {}, ...Object.values(platformDefaults)]
+        .map((binding) => bindingKey(storageView, binding));
+      const currentKey = bindingKey(storageView, storageView.binding);
+      const wantedBinding = platformDefaults[currentSetupPlatform()] || template.default_binding || {};
+      const wantedKey = bindingKey(storageView, wantedBinding);
+      if (currentKey === wantedKey || !startingKeys.includes(currentKey)) {
+        return;
+      }
+      storageView.binding = JSON.parse(wantedKey);
+      changed = true;
+    });
+    return changed;
+  }
+
   function existingSavedChassisView(profileId = "") {
     return state.storageViews.find(
       (storageView) => storageView.kind === "ses_enclosure" && String(storageView.profile_id || "") === String(profileId || "")
@@ -8241,6 +8267,7 @@
       syncBmcFields();
       syncSshFields();
       renderQuantastorHaSection();
+      syncStorageViewPlatformBindings();
       renderStorageViews();
       updateCreateButton();
       scheduleSudoersPreviewRefresh();
