@@ -2951,6 +2951,9 @@
       return null;
     }
     const slotLabels = normalizeSlotLabelMap(template.default_slot_labels);
+    // Platform-specific IDs (the AOC-SLG4-2H8M2 RAID members on ESXi) apply
+    // only when the system being edited runs that platform (#951).
+    const platformBinding = template.platform_binding_defaults?.[currentSetupPlatform()];
     return normalizeStorageView(
       {
         id: uniqueStorageViewId(template.default_id || template.label),
@@ -2960,11 +2963,37 @@
         enabled: true,
         order: nextStorageViewOrder(),
         render: template.default_render || {},
-        binding: template.default_binding || {},
+        binding: platformBinding || template.default_binding || {},
         layout_overrides: Object.keys(slotLabels).length ? { slot_labels: slotLabels, slot_sizes: {} } : null,
       },
       state.storageViews.length
     );
+  }
+
+  function syncStorageViewPlatformBindings() {
+    // A view still on one of its template's starting bindings follows the
+    // Platform field; a binding the operator edited is left alone (#951).
+    let changed = false;
+    const bindingKey = (storageView, binding) =>
+      JSON.stringify(normalizeStorageView({ template_id: storageView.template_id, binding }).binding);
+    state.storageViews.forEach((storageView) => {
+      const template = getStorageViewTemplate(storageView?.template_id);
+      const platformDefaults = template?.platform_binding_defaults || {};
+      if (storageView?.generated || !Object.keys(platformDefaults).length) {
+        return;
+      }
+      const startingKeys = [template.default_binding || {}, ...Object.values(platformDefaults)]
+        .map((binding) => bindingKey(storageView, binding));
+      const currentKey = bindingKey(storageView, storageView.binding);
+      const wantedBinding = platformDefaults[currentSetupPlatform()] || template.default_binding || {};
+      const wantedKey = bindingKey(storageView, wantedBinding);
+      if (currentKey === wantedKey || !startingKeys.includes(currentKey)) {
+        return;
+      }
+      storageView.binding = JSON.parse(wantedKey);
+      changed = true;
+    });
+    return changed;
   }
 
   function existingSavedChassisView(profileId = "") {
@@ -8238,6 +8267,7 @@
       syncBmcFields();
       syncSshFields();
       renderQuantastorHaSection();
+      syncStorageViewPlatformBindings();
       renderStorageViews();
       updateCreateButton();
       scheduleSudoersPreviewRefresh();

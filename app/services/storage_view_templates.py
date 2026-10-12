@@ -24,6 +24,9 @@ class StorageViewTemplate(BaseModel):
     slot_layout: list[list[int | None]] = Field(default_factory=list)
     default_render: StorageViewRenderConfig = Field(default_factory=StorageViewRenderConfig)
     default_binding: StorageViewBindingConfig = Field(default_factory=StorageViewBindingConfig)
+    # Binding a new view starts with when the system's platform is the key, in
+    # place of default_binding. Keeps platform-specific IDs off other platforms.
+    platform_binding_defaults: dict[str, StorageViewBindingConfig] = Field(default_factory=dict)
     default_slot_labels: dict[int, str] = Field(default_factory=dict)
     supports_led: bool = False
     supports_auto_discovery: bool = False
@@ -106,13 +109,40 @@ def list_storage_view_templates() -> list[StorageViewTemplate]:
             notes="Good for internal all-flash groups that should stay attached to the same host. Slot 1 is nearest the PCIe edge.",
         ),
         StorageViewTemplate(
+            id="m2-carrier-passive-2",
+            label="2x M.2 carrier (passive)",
+            default_id="m2-carrier",
+            default_label="2x M.2 Carrier",
+            kind="nvme_carrier",
+            summary=(
+                "Two M.2 drives on a passive (bifurcated) carrier; each drive is its own NVMe device."
+            ),
+            rows=2,
+            columns=1,
+            slot_count=2,
+            slot_layout=[[1], [0]],
+            default_render=StorageViewRenderConfig(
+                show_in_main_ui=True,
+                show_in_admin_ui=True,
+                default_collapsed=False,
+            ),
+            default_binding=StorageViewBindingConfig(mode="auto"),
+            default_slot_labels={
+                0: "M2-1",
+                1: "M2-2",
+            },
+            supports_led=False,
+            supports_auto_discovery=False,
+            notes="For plain two-slot M.2 carriers with no RAID chip. Add serials or device names to place each drive.",
+        ),
+        StorageViewTemplate(
             id="aoc-slg4-2h8m2-2",
             label="Supermicro AOC-SLG4-2H8M2",
             default_id="aoc-slg4-2h8m2",
             default_label="AOC-SLG4-2H8M2",
             kind="nvme_carrier",
             summary=(
-                "Two-slot Supermicro M.2 RAID card. On ESXi the two RAID members map to M2-1 and M2-2."
+                "Two-slot Supermicro M.2 RAID card. The two drives map to M2-1 and M2-2."
             ),
             rows=2,
             columns=1,
@@ -120,15 +150,20 @@ def list_storage_view_templates() -> list[StorageViewTemplate]:
             # The supplied card photo labels M2-2 above M2-1, so render slot 1 above slot 0.
             slot_layout=[[1], [0]],
             default_render=StorageViewRenderConfig(
-                show_in_main_ui=False,
+                show_in_main_ui=True,
                 show_in_admin_ui=True,
                 default_collapsed=False,
             ),
-            default_binding=StorageViewBindingConfig(
-                mode="hybrid",
-                pcie_addresses=["C0 x4", "C1 x4"],
-                device_names=["13:0", "13:1"],
-            ),
+            default_binding=StorageViewBindingConfig(mode="hybrid"),
+            # The RAID controller reports its members as 13:0/13:1 on C0/C1 only
+            # on ESXi; other platforms see plain NVMe devices (#951).
+            platform_binding_defaults={
+                "esxi": StorageViewBindingConfig(
+                    mode="hybrid",
+                    pcie_addresses=["C0 x4", "C1 x4"],
+                    device_names=["13:0", "13:1"],
+                ),
+            },
             default_slot_labels={
                 0: "M2-1",
                 1: "M2-2",
