@@ -82,6 +82,8 @@ class ParsedSSHData:
     # `zpool status -LP` members keyed by device and partition name. They only
     # answer pool and vdev for a bay; the device node is not a stable identity.
     zpool_device_members: dict[str, ZpoolMember] = field(default_factory=dict)
+    # Each pool's ` state:` line from `zpool status`, keyed by pool name.
+    zpool_pool_states: dict[str, str] = field(default_factory=dict)
     multipath_info: dict[str, "MultipathInfo"] = field(default_factory=dict)
     ses_slot_to_device: dict[int, str] = field(default_factory=dict)
     camcontrol_models: dict[str, str] = field(default_factory=dict)
@@ -3170,6 +3172,22 @@ def parse_zpool_status(output: str) -> dict[str, ZpoolMember]:
     return members
 
 
+def parse_zpool_pool_states(output: str) -> dict[str, str]:
+    """Read each pool's ` state:` line from `zpool status` output."""
+    states: dict[str, str] = {}
+    current_pool: str | None = None
+    for raw_line in output.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("pool:"):
+            current_pool = normalize_text(stripped.split(":", 1)[1])
+            continue
+        if current_pool and stripped.startswith("state:"):
+            state = normalize_text(stripped.split(":", 1)[1])
+            if state:
+                states.setdefault(current_pool, state.upper())
+    return states
+
+
 def parse_zpool_status_by_device(output: str) -> dict[str, ZpoolMember]:
     """Parse `zpool status -LP`, whose config block is indented with a tab."""
     # Tabs are expanded so nesting depth, and with it the vdev, survives.
@@ -4894,6 +4912,10 @@ def parse_ssh_outputs(
         output = normalized_outputs.get(command_key)
         if output:
             setattr(parsed, attribute, parser(output))
+
+    for command_key in ("zpool status -gP", "zpool status -LP"):
+        for pool_name, state in parse_zpool_pool_states(normalized_outputs.get(command_key) or "").items():
+            parsed.zpool_pool_states.setdefault(pool_name, state)
 
     lsscsi_devices: list[LinuxScsiDevice] = []
     if normalized_outputs.get("lsscsi -g"):

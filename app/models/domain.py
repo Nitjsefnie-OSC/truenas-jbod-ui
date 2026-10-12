@@ -897,6 +897,7 @@ class StorageViewRuntimeSlot(BaseModel):
     smart_device_type: str | None = None
     serial: str | None = None
     pool_name: str | None = None
+    vdev_name: str | None = None
     model: str | None = None
     size_bytes: int | None = None
     bus: str | None = None

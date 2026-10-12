@@ -3054,6 +3054,16 @@ class InventoryService:
 
         return runtime_slot.slot_index, f"storage-view:{runtime_view.id}"
 
+    @classmethod
+    def _storage_view_runtime_slot_state(cls, runtime_slot: StorageViewRuntimeSlot) -> SlotState:
+        if not runtime_slot.occupied:
+            return SlotState.empty
+        if runtime_slot.state == SlotState.identify.value:
+            return SlotState.identify
+        if runtime_slot.state == SlotState.fault.value or cls._health_is_bad(runtime_slot.health):
+            return SlotState.fault
+        return SlotState.healthy
+
     def _build_slot_view_from_storage_view_runtime_slot(
         self,
         runtime_view: StorageViewRuntimeView,
@@ -3084,7 +3094,7 @@ class InventoryService:
             enclosure_label=runtime_view.label,
             enclosure_name=runtime_view.label,
             present=runtime_slot.occupied,
-            state=SlotState.healthy if runtime_slot.occupied else SlotState.empty,
+            state=self._storage_view_runtime_slot_state(runtime_slot),
             device_name=runtime_slot.device_name,
             smart_device_names=list(runtime_slot.smart_device_names),
             smart_device_type=runtime_slot.smart_device_type,
@@ -3095,6 +3105,7 @@ class InventoryService:
             gptid=runtime_slot.gptid,
             persistent_id_label=runtime_slot.persistent_id_label,
             pool_name=runtime_slot.pool_name,
+            vdev_name=runtime_slot.vdev_name,
             topology_label=runtime_slot.description or runtime_slot.placement_key or runtime_view.label,
             health=runtime_slot.health,
             temperature_c=runtime_slot.temperature_c,
@@ -3366,7 +3377,8 @@ class InventoryService:
             target_system_id=target_system_id,
             target_system_label=target_system_label or candidate.get("storage_system_label"),
             occupied=True,
-            state="matched",
+            # Same rule as an enclosure bay: bad disk or pool member health is a Fault (#949).
+            state=SlotState.fault.value if self._health_is_bad(candidate.get("health")) else "matched",
             source="inventory_candidate",
             match_reasons=match_reasons,
             placement_key=placement_key,
@@ -3378,6 +3390,7 @@ class InventoryService:
             smart_device_type=normalize_text(candidate.get("smartctl_device_type")),
             serial=candidate.get("serial"),
             pool_name=candidate.get("pool_name"),
+            vdev_name=candidate.get("vdev_name"),
             model=candidate.get("model"),
             size_bytes=candidate.get("size_bytes"),
             bus=candidate.get("bus"),
@@ -6924,6 +6937,9 @@ class InventoryService:
                     warnings.append(storcli_runtime_warning)
         if self.system.truenas.platform == "scale" and scale_ses_data.ses_enclosures:
             ssh_data = self._merge_ses_overlay_data(ssh_data, scale_ses_data)
+        for warning in self._pool_state_warnings(raw_data, ssh_data):
+            if warning not in warnings:
+                warnings.append(warning)
 
         has_scale_linux_ses = self._has_scale_linux_ses(ssh_data)
         if self.system.truenas.platform not in {"linux", "esxi", "ipmi"} and not raw_data.enclosures:
@@ -7866,6 +7882,14 @@ class InventoryService:
         )
         assigned_lookup_keys = self._collect_assigned_lookup_keys(snapshot.slots)
         allow_virtual_reuse = self.system.truenas.platform == "esxi"
+        # TrueNAS disk rows rarely carry health; the pool member does, as it
+        # does for an enclosure bay (#949). Other platforms already put their
+        # member state on the disk record.
+        api_topology_members = (
+            parse_pool_query_topology(source_bundle.raw_data.pools)
+            if self.system.truenas.platform in {"core", "scale"}
+            else None
+        )
         candidates: list[dict[str, Any]] = []
         seen_candidate_ids: set[str] = set()
         for disk in disk_records:
@@ -7873,7 +7897,11 @@ class InventoryService:
                 continue
             if not allow_virtual_reuse and disk.lookup_keys & assigned_lookup_keys:
                 continue
-            serialized = self._serialize_storage_view_candidate(disk)
+            pool_member = None
+            if api_topology_members is not None:
+                gptid = ssh_data.glabel.device_to_gptid.get(disk.device_name.lower()) if disk.device_name else None
+                pool_member = self._lookup_zpool_member(disk, disk.device_name, gptid, ssh_data, api_topology_members)
+            serialized = self._serialize_storage_view_candidate(disk, pool_member=pool_member)
             if snapshot.selected_enclosure_label:
                 serialized["storage_system_label"] = snapshot.selected_enclosure_label
             candidate_key = self._candidate_identity_key(serialized)
@@ -7935,7 +7963,21 @@ class InventoryService:
             or disk.raw.get("hctl")
         )
 
-    def _serialize_storage_view_candidate(self, disk: DiskRecord) -> dict[str, Any]:
+    @classmethod
+    def _storage_view_health(cls, disk_health: str | None, member_health: str | None) -> str | None:
+        # Show the value that explains a Fault; otherwise the pool member's
+        # state, which is the one an operator acts on.
+        for value in (member_health, disk_health):
+            if cls._health_is_bad(value):
+                return value
+        return member_health or disk_health
+
+    def _serialize_storage_view_candidate(
+        self,
+        disk: DiskRecord,
+        *,
+        pool_member: ZpoolMember | None = None,
+    ) -> dict[str, Any]:
         device_names = [
             device
             for device in dict.fromkeys(
@@ -8005,7 +8047,8 @@ class InventoryService:
             "smart_device_names": list(disk.smart_devices),
             "gptid": persistent_id or normalize_gptid(disk.identifier),
             "persistent_id_label": persistent_id_label,
-            "health": disk.health,
+            "vdev_name": pool_member.vdev_name if pool_member else None,
+            "health": self._storage_view_health(disk.health, pool_member.health if pool_member else None),
             "temperature_c": disk.temperature_c,
             "last_smart_test_type": disk.last_smart_test_type,
             "last_smart_test_status": disk.last_smart_test_status,
@@ -11808,6 +11851,7 @@ class InventoryService:
             glabel=base.glabel,
             zpool_members=dict(base.zpool_members),
             zpool_device_members=dict(base.zpool_device_members),
+            zpool_pool_states=dict(base.zpool_pool_states),
             multipath_info=dict(base.multipath_info),
             ses_slot_to_device=dict(base.ses_slot_to_device),
             camcontrol_models=dict(base.camcontrol_models),
@@ -14046,6 +14090,25 @@ class InventoryService:
                 return None
             matched = info
         return matched
+
+    def _pool_state_warnings(self, raw_data: TrueNASRawData, ssh_data: ParsedSSHData) -> list[str]:
+        """Name each TrueNAS pool whose reported state is not ONLINE (#949)."""
+        if self.system.truenas.platform not in {"core", "scale"}:
+            return []
+        states: dict[str, str] = {}
+        for pool in raw_data.pools:
+            if not isinstance(pool, dict):
+                continue
+            name = normalize_text(pool.get("name"))
+            status = pool.get("status")
+            state = normalize_text(status) if isinstance(status, str) else None
+            if name and state:
+                states.setdefault(name, state.upper())
+        # The API answers for the pools it lists; `zpool status` adds the rest,
+        # such as the boot pool, and covers every pool when the API is down.
+        for name, state in ssh_data.zpool_pool_states.items():
+            states.setdefault(name, state)
+        return [f"Pool {name} is {state}." for name, state in states.items() if state != "ONLINE"]
 
     def _extract_pool_name(self, disk: dict[str, Any]) -> str | None:
         pool = disk.get("pool")
