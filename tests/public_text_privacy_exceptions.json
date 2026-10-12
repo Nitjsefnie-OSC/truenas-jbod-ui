@@ -26,7 +26,7 @@
   "admin_service/services/account_bootstrap.py": {
     "findings": {
       "private_posix_host_path": {
-        "sha256:9a9332694ce509a7b52cb6cc29ddd16b7780d5d6629701a3f4b8211812e0a614": 1
+        "sha256:21c44eae006ea516a4bb49b36fba6e5735d41beffbc98c12c84869fd9ac34cd1": 3
       }
     },
     "reason": "Reviewed source literal or validation pattern; exact detector counts are pinned."
@@ -51,6 +51,9 @@
     "findings": {
       "internal_hostname": {
         "sha256:498dc35957eacb17c980a86fe8a902db9318e952a58cfbf927916145b1fa18aa": 3
+      },
+      "private_posix_host_path": {
+        "sha256:a07dce1f241c2f2ae46d6610979f269e0a827ecd4732f046d20e6eea741b304b": 2
       }
     },
     "reason": "Reviewed source literal or validation pattern; exact detector counts are pinned."
@@ -118,6 +121,9 @@
     "findings": {
       "internal_hostname": {
         "sha256:d7a7d53fca74148c85df8ac218d69e03814e7ba618e3dbb45a6713024a337023": 1
+      },
+      "private_posix_host_path": {
+        "sha256:a0d82ceddab03088448446083144dc5d20af159bf301ab233aaced5e4053b045": 1
       }
     },
     "reason": "Reviewed public documentation example; exact detector counts are pinned."
@@ -337,10 +343,42 @@
     },
     "reason": "Deterministic synthetic fixture; exact detector counts are pinned."
   },
+  "tests/js/admin_bootstrap_platform_copy.test.js": {
+    "findings": {
+      "private_posix_host_path": {
+        "sha256:a290b1703a1163a39ffe5bb31943aaa88cf9f545e78029d5a6262a0b86a65a51": 4
+      }
+    },
+    "reason": "Synthetic or adversarial test literal; exact detector counts are pinned."
+  },
+  "tests/js/admin_completion_ownership.test.js": {
+    "findings": {
+      "private_posix_host_path": {
+        "sha256:762ddb75538954a80ce9fb3bbc39ac15eeb82044b1312498808aa4962d22f1d7": 1
+      }
+    },
+    "reason": "Synthetic or adversarial test literal; exact detector counts are pinned."
+  },
   "tests/js/admin_editor_flows.test.js": {
     "findings": {
       "internal_hostname": {
         "sha256:70e64122b5b0d900cb7a690f79dac1b61c09be771c8df91fa64e9b6d600e5c21": 1
+      }
+    },
+    "reason": "Synthetic or adversarial test literal; exact detector counts are pinned."
+  },
+  "tests/js/admin_plain_copy.test.js": {
+    "findings": {
+      "private_posix_host_path": {
+        "sha256:af7d170f88c75df7306afcba35566d5f3e00e5ef4fd663af2634f98dac343bca": 1
+      }
+    },
+    "reason": "Synthetic or adversarial test literal; exact detector counts are pinned."
+  },
+  "tests/js/admin_profile_delete_setup.test.js": {
+    "findings": {
+      "private_posix_host_path": {
+        "sha256:fcba5bce06a0930112b99c72c63ba982103b6fd2f1ec0782c092623083f8ff0f": 1
       }
     },
     "reason": "Synthetic or adversarial test literal; exact detector counts are pinned."
@@ -359,7 +397,7 @@
         "sha256:cb345dd95355b12b3628a9305b73277c0689a0b7dc4920453b607fc8ac81cda6": 2
       },
       "private_posix_host_path": {
-        "sha256:989baf8b8d6cd45c0744bd9a210f537a81a26e6e7c9ff4ee5354e978a7211d4c": 2
+        "sha256:7e04fc1997830f69e825d8cb2ecf5a1101935884d78a269b5ad25e373a3582b8": 25
       }
     },
     "reason": "Synthetic or adversarial test literal; exact detector counts are pinned."
@@ -651,6 +689,9 @@
     "findings": {
       "internal_hostname": {
         "sha256:03562184a597ec6c60d29e1453486282c4242fb41a6632526bd6902865f8962f": 7
+      },
+      "private_posix_host_path": {
+        "sha256:a0d82ceddab03088448446083144dc5d20af159bf301ab233aaced5e4053b045": 1
       }
     },
     "reason": "Reviewed operator-documentation example; exact detector counts are pinned."
