@@ -330,4 +330,43 @@ test("picking a card layout from the layout catalog keeps the select and the sav
     assert.equal(state.selectedProfileId, picked);
     assert.equal(elements.setupProfile.value, picked, `Save would post ${elements.setupProfile.value || "auto"}`);
   }
+  // Picking a chassis card after a card layout drops the Current option.
+  for (const saved of EXCLUDED_PROFILE_IDS) {
+    onClick({ target: { closest: () => ({ dataset: { profileId: saved } }) } });
+    onClick({ target: { closest: () => ({ dataset: { profileId: "supermicro-cse-946-top-60" } }) } });
+    assert.equal(elements.setupProfile.value, "supermicro-cse-946-top-60");
+    assert.ok(!elements.setupProfile.options.some((option) => option.value === saved), `${saved} is still offered`);
+  }
+});
+
+test("choosing a chassis in the Chassis layout select drops the Current card option", () => {
+  // Codex review on #966: the real change handler, not a manual re-render.
+  const start = SOURCE.indexOf("    elements.setupProfile?.addEventListener(\"change\", () => {");
+  const end = SOURCE.indexOf("\n    elements.setupBmcEnabled", start);
+  assert.ok(start > 0 && end > start);
+  for (const saved of EXCLUDED_PROFILE_IDS) {
+    const { api, elements, state } = load({ selectedProfileId: saved });
+    api.renderProfileOptions();
+    elements.setupProfile.value = state.selectedProfileId;
+    assert.equal(elements.setupProfile.value, saved);
+    let onChange = null;
+    elements.setupProfile.addEventListener = (name, listener) => { onChange = listener; };
+    const context = vm.createContext({
+      state, elements, renderProfileOptions: api.renderProfileOptions,
+      renderProfilePreview() {}, renderProfileCatalog() {}, renderProfileBuilder() {}, renderStorageViews() {},
+    });
+    vm.runInContext(SOURCE.slice(start, end), context, { filename: "admin.js" });
+
+    for (const picked of ["supermicro-fat-twin-front-6", ""]) {
+      elements.setupProfile.value = saved;
+      api.renderProfileOptions();
+      state.selectedProfileId = saved;
+      elements.setupProfile.value = picked;
+      onChange();
+      assert.equal(state.selectedProfileId, picked);
+      assert.equal(elements.setupProfile.value, picked);
+      assert.ok(!elements.setupProfile.options.some((option) => option.value === saved),
+        `${saved} is still offered after choosing ${picked || "Detect automatically"}`);
+    }
+  }
 });

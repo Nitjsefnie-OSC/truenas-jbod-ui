@@ -8017,10 +8017,9 @@
         state.selectedProfileId = savedProfileId;
         if (elements.setupProfile) {
           elements.setupProfile.value = savedProfileId;
-          if (elements.setupProfile.value !== savedProfileId) {
-            // Not a chassis layout, so not listed: show it as Current.
-            renderProfileOptions();
-          }
+          // Shows a card or rear-group layout as Current, or drops a stale
+          // Current option (#952).
+          renderProfileOptions();
         }
         recordSetupDraftChange(draftBefore);
         owner.advance();
@@ -8367,6 +8366,8 @@
     });
     elements.setupProfile?.addEventListener("change", () => {
       state.selectedProfileId = elements.setupProfile?.value || "";
+      // Drops a Current card or rear-group option once another layout is chosen (#952).
+      renderProfileOptions();
       renderProfilePreview();
       renderProfileCatalog();
       renderProfileBuilder();
@@ -8395,10 +8396,9 @@
       const draftBefore = setupDraftSnapshot();
       state.selectedProfileId = card.dataset.profileId || "";
       elements.setupProfile.value = state.selectedProfileId;
-      if (elements.setupProfile.value !== state.selectedProfileId) {
-        // Not a chassis layout, so not listed: show it as Current.
-        renderProfileOptions();
-      }
+      // Shows a card or rear-group pick as Current, or drops that option once
+      // a chassis is picked (#952).
+      renderProfileOptions();
       recordSetupDraftChange(draftBefore);
       renderProfilePreview();
       elements.profileCatalog.querySelectorAll("[data-profile-id]").forEach((profileCard) => {
