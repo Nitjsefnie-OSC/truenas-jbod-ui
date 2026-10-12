@@ -2854,7 +2854,18 @@ class AdminStatePayloadTests(unittest.TestCase):
         self.assertEqual(payload["systems"][0]["storage_views"][0]["template_id"], "ses-auto")
         self.assertEqual(payload["systems"][0]["storage_views"][0]["profile_id"], "lab-4x4")
         self.assertEqual(payload["storage_view_templates"][0]["id"], "ses-auto")
-        self.assertTrue(any(template["id"] == "aoc-slg4-2h8m2-2" for template in payload["storage_view_templates"]))
+        templates_by_id = {template["id"]: template for template in payload["storage_view_templates"]}
+        aoc_template = templates_by_id["aoc-slg4-2h8m2-2"]
+        self.assertTrue(aoc_template["default_render"]["show_in_main_ui"])
+        self.assertEqual(aoc_template["default_binding"]["device_names"], [])
+        self.assertEqual(aoc_template["default_binding"]["pcie_addresses"], [])
+        self.assertEqual(
+            aoc_template["platform_binding_defaults"]["esxi"]["device_names"],
+            ["13:0", "13:1"],
+        )
+        passive_template = templates_by_id["m2-carrier-passive-2"]
+        self.assertEqual(passive_template["default_binding"]["mode"], "auto")
+        self.assertEqual(passive_template["platform_binding_defaults"], {})
         self.assertIn("runtime_behavior", payload)
         self.assertTrue(any(field["key"] == "source_bundle_cache_ttl_seconds" for field in payload["runtime_behavior"]["fields"]))
         custom_profile = next(profile for profile in payload["profiles"] if profile["id"] == "lab-4x4")

@@ -2950,6 +2950,9 @@
       return null;
     }
     const slotLabels = normalizeSlotLabelMap(template.default_slot_labels);
+    // Platform-specific IDs (the AOC-SLG4-2H8M2 RAID members on ESXi) apply
+    // only when the system being edited runs that platform (#951).
+    const platformBinding = template.platform_binding_defaults?.[currentSetupPlatform()];
     return normalizeStorageView(
       {
         id: uniqueStorageViewId(template.default_id || template.label),
@@ -2959,7 +2962,7 @@
         enabled: true,
         order: nextStorageViewOrder(),
         render: template.default_render || {},
-        binding: template.default_binding || {},
+        binding: platformBinding || template.default_binding || {},
         layout_overrides: Object.keys(slotLabels).length ? { slot_labels: slotLabels, slot_sizes: {} } : null,
       },
       state.storageViews.length
