@@ -26,6 +26,20 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   Highlights and Upgrade notes prepended via scripts/render_release_notes.py.
 -->
 
+## Unreleased
+
+### Upgrade notes
+
+- On TrueNAS CORE hosts read over SSH only, separate backplanes and AHCI SGPIO
+  ports are no longer one combined enclosure, so its id changes; save bay
+  assignments made on the old combined view again (#955).
+
+### Fixed
+
+- CORE SSH stopped stacking separate backplanes and AHCI SGPIO ports into one
+  shelf drawn as the 60-bay CSE-946, and read pool names without the API
+  (#955).
+
 ## v0.24.0-beta.3 - 2026-10-11
 
 This prerelease adds the fixes merged after `v0.24.0-beta.2`. GHCR gets the

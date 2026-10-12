@@ -79,6 +79,9 @@ class ZpoolMember:
 class ParsedSSHData:
     glabel: GlabelInfo = field(default_factory=GlabelInfo)
     zpool_members: dict[str, ZpoolMember] = field(default_factory=dict)
+    # `zpool status -LP` members keyed by device and partition name. They only
+    # answer pool and vdev for a bay; the device node is not a stable identity.
+    zpool_device_members: dict[str, ZpoolMember] = field(default_factory=dict)
     multipath_info: dict[str, "MultipathInfo"] = field(default_factory=dict)
     ses_slot_to_device: dict[int, str] = field(default_factory=dict)
     camcontrol_models: dict[str, str] = field(default_factory=dict)
@@ -2424,21 +2427,22 @@ def _enclosure_sort_key(item: SESMapEnclosure) -> tuple[int, str, str, str, str,
     )
 
 
-def _pick_preferred_enclosures(
-    enclosures: list[SESMapEnclosure],
-    slot_count: int,
-) -> list[SESMapEnclosure]:
-    if not enclosures:
-        return []
+def is_ahci_sgpio_enclosure(enclosure: SESMapEnclosure) -> bool:
+    """The motherboard's onboard SATA ports, reported as an SES enclosure."""
+    haystack = " ".join(filter(None, [enclosure.enclosure_name, enclosure.enclosure_label])).lower()
+    return "ahci sgpio" in haystack
 
-    front_rear = [
+
+def _named_front_or_rear(enclosures: list[SESMapEnclosure]) -> list[SESMapEnclosure]:
+    return [
         item
         for item in enclosures
         if item.enclosure_name and ("front" in item.enclosure_name.lower() or "rear" in item.enclosure_name.lower())
     ]
-    candidates = front_rear or enclosures
-    ordered = sorted(candidates, key=_enclosure_sort_key)
 
+
+def _stack_enclosures(enclosures: list[SESMapEnclosure], slot_count: int) -> list[SESMapEnclosure]:
+    ordered = sorted(enclosures, key=_enclosure_sort_key)
     selected: list[SESMapEnclosure] = []
     capacity = 0
     for enclosure in ordered:
@@ -2446,8 +2450,64 @@ def _pick_preferred_enclosures(
         capacity += _infer_ses_slot_count(enclosure)
         if slot_count and capacity >= slot_count:
             break
-
     return selected or ordered[:1]
+
+
+def _pick_preferred_enclosures(
+    enclosures: list[SESMapEnclosure],
+    slot_count: int,
+    *,
+    explicit_selection: bool = False,
+) -> list[SESMapEnclosure]:
+    if not enclosures:
+        return []
+    if explicit_selection:
+        # The caller named these enclosures; draw them in shelf order.
+        return _stack_enclosures(_named_front_or_rear(enclosures) or enclosures, slot_count)
+
+    # Stack only enclosures that read as parts of one shelf, such as the two
+    # 30-bay SES groups of a 60-bay top-loader: no layout of their own and not
+    # the onboard SATA ports. A backplane with its own layout and the AHCI
+    # SGPIO pseudo-enclosure stay separate views (#948).
+    shelves = [item for item in enclosures if not is_ahci_sgpio_enclosure(item)]
+    if not shelves:
+        return _stack_enclosures(enclosures, slot_count)
+    parts = [item for item in shelves if not item.profile_id]
+    halves = [item for item in parts if _reads_front_or_rear(item)]
+    if len(halves) > 1:
+        stacked = _stack_enclosures(halves, slot_count)
+        if len(stacked) > 1:
+            return stacked
+
+    # Otherwise the default view is one shelf, or one set of same-model SES
+    # groups with no layout of their own: front first, then the most bays.
+    views = [[item] for item in shelves]
+    for group in _same_name_groups(parts):
+        stacked = _stack_enclosures(group, slot_count)
+        if len(stacked) > 1:
+            views.append(stacked)
+    return min(
+        views,
+        key=lambda view: (
+            _enclosure_sort_key(view[0])[0],
+            -sum(_infer_ses_slot_count(item) for item in view),
+            _enclosure_sort_key(view[0]),
+        ),
+    )
+
+
+def _reads_front_or_rear(enclosure: SESMapEnclosure) -> bool:
+    text = " ".join(filter(None, [enclosure.enclosure_name, enclosure.enclosure_label])).lower()
+    return "front" in text or "rear" in text
+
+
+def _same_name_groups(enclosures: list[SESMapEnclosure]) -> list[list[SESMapEnclosure]]:
+    groups: dict[str, list[SESMapEnclosure]] = {}
+    for item in enclosures:
+        name = (item.enclosure_name or "").strip().casefold()
+        if name:
+            groups.setdefault(name, []).append(item)
+    return [group for group in groups.values() if len(group) > 1]
 
 
 def _merge_control_targets(
@@ -2675,7 +2735,9 @@ def build_slot_candidates_from_ses_enclosures(
 
     Many systems expose two 30-slot SES groups for a 60-bay shelf. When that pattern
     is detected, we stack the groups into one 60-slot view in name order, preferring
-    "Front" before "Rear". Duplicate paths to the same enclosure ID are merged.
+    "Front" before "Rear". An enclosure with its own inferred layout and the AHCI
+    SGPIO pseudo-enclosure are never stacked. Duplicate paths to the same
+    enclosure ID are merged.
     """
     merged_enclosures = enclosures if enclosures_are_merged else _merge_ses_enclosures(enclosures)
     selected_ids = {
@@ -2700,7 +2762,7 @@ def build_slot_candidates_from_ses_enclosures(
             continue
         filtered.append(enclosure)
 
-    ordered = _pick_preferred_enclosures(filtered, slot_count)
+    ordered = _pick_preferred_enclosures(filtered, slot_count, explicit_selection=bool(selected_ids))
 
     candidates: dict[int, dict[str, Any]] = {}
     labels: list[str] = []
@@ -3106,6 +3168,12 @@ def parse_zpool_status(output: str) -> dict[str, ZpoolMember]:
             members[key] = member
 
     return members
+
+
+def parse_zpool_status_by_device(output: str) -> dict[str, ZpoolMember]:
+    """Parse `zpool status -LP`, whose config block is indented with a tab."""
+    # Tabs are expanded so nesting depth, and with it the vdev, survives.
+    return parse_zpool_status(output.expandtabs(8))
 
 
 def parse_pool_query_topology(pools: list[dict[str, Any]]) -> dict[str, ZpoolMember]:
@@ -3988,7 +4056,12 @@ def canonicalize_ssh_command(command: str) -> str:
     if executable == "esxcli" and (storcli_key := _esxcli_storcli_key(args)):
         return storcli_key
     if executable == "zpool" and args[:1] == ["status"]:
-        return "zpool status -gP" if "-gP" in args[1:] else "zpool status"
+        if "-gP" in args[1:]:
+            return "zpool status -gP"
+        flags = {flag for arg in args[1:] if arg.startswith("-") and not arg.startswith("--") for flag in arg[1:]}
+        # `-L` names each member by its real device node, the only form an
+        # SSH-only bay can join on (#948).
+        return "zpool status -LP" if {"L", "P"} <= flags and "g" not in flags else "zpool status"
     if executable == "camcontrol" and args[:1] == ["devlist"]:
         return "camcontrol devlist -v" if "-v" in args[1:] else "camcontrol devlist"
 
@@ -4781,9 +4854,14 @@ def parse_nvme_list_subsys_json(output: str) -> dict[str, dict[str, str | None]]
     return controllers
 
 
+# Read-only pool members by real device node; runs without sudo on CORE 13.
+CORE_ZPOOL_STATUS_BY_DEVICE_COMMAND = "/usr/local/sbin/zpool status -LP"
+CORE_ZPOOL_STATUS_BY_DEVICE_OPTIONAL_COMMAND = f"{CORE_ZPOOL_STATUS_BY_DEVICE_COMMAND} 2>/dev/null || true"
+
 SSH_OUTPUT_PARSERS = {
     "glabel status": ("glabel", parse_glabel_status),
     "zpool status -gP": ("zpool_members", parse_zpool_status),
+    "zpool status -LP": ("zpool_device_members", parse_zpool_status_by_device),
     "lsblk -OJ": ("linux_blockdevices", parse_lsblk_json),
     "mdadm --detail --scan": ("linux_mdadm_arrays", parse_mdadm_detail_scan),
     "nvme list-subsys -o json": ("linux_nvme_subsystems", parse_nvme_list_subsys_json),

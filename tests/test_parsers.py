@@ -3783,6 +3783,7 @@ phy identifier: 0x1""",
             {
                 "glabel status": ("glabel", "parse_glabel_status"),
                 "zpool status -gP": ("zpool_members", "parse_zpool_status"),
+                "zpool status -LP": ("zpool_device_members", "parse_zpool_status_by_device"),
                 "lsblk -OJ": ("linux_blockdevices", "parse_lsblk_json"),
                 "mdadm --detail --scan": ("linux_mdadm_arrays", "parse_mdadm_detail_scan"),
                 "nvme list-subsys -o json": ("linux_nvme_subsystems", "parse_nvme_list_subsys_json"),
@@ -3904,6 +3905,132 @@ phy identifier: 0x1""",
         source = inspect.getsource(parsers.merge_slot_candidate_maps)
         self.assertIn("_merge_control_targets(", source)
         self.assertIn("strict=False", source)
+
+
+class CoreShelfStackingTests(unittest.TestCase):
+    """CORE SSH shelves are stacked only when they are halves of one shelf (#948)."""
+
+    def test_separate_backplanes_and_ahci_sgpio_are_not_stacked(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        parsed = parse_ssh_outputs({"sudo -n /usr/sbin/sesutil map": fx.SSG_SESUTIL_MAP}, 60, None)
+
+        meta = parsed.ses_selected_meta
+        self.assertEqual(meta["id"], fx.FRONT_24_ID)
+        self.assertEqual(meta["label"], "Front 24 Bay")
+        self.assertEqual(sorted(parsed.ses_slot_candidates), list(range(24)))
+        self.assertEqual(
+            {candidate["enclosure_id"] for candidate in parsed.ses_slot_candidates.values()},
+            {fx.FRONT_24_ID},
+        )
+        self.assertNotIn("ada0", parsed.ses_slot_to_device.values())
+
+    def test_an_enclosure_with_its_own_layout_is_never_stacked_under_a_filter(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        parsed = parse_ssh_outputs({"sesutil map": fx.SSG_SESUTIL_MAP}, 60, "SAS3x")
+
+        self.assertEqual(parsed.ses_selected_meta["id"], fx.FRONT_24_ID)
+        self.assertEqual(len(parsed.ses_slot_candidates), 24)
+
+    def test_two_halves_of_one_shelf_still_combine_into_one_view(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        parsed = parse_ssh_outputs({"sesutil map": fx.TOP_LOADER_SESUTIL_MAP}, 60, None)
+
+        self.assertEqual(parsed.ses_selected_meta["id"], f"{fx.HALF_FRONT_ID}+{fx.HALF_REAR_ID}")
+        self.assertEqual(sorted(parsed.ses_slot_candidates), list(range(60)))
+        self.assertEqual(parsed.ses_slot_candidates[0]["device_names"], ["da10"])
+        self.assertEqual(parsed.ses_slot_candidates[30]["device_names"], ["da40"])
+        self.assertEqual(
+            {candidate["enclosure_id"] for candidate in parsed.ses_slot_candidates.values()},
+            {fx.HALF_FRONT_ID, fx.HALF_REAR_ID},
+        )
+
+    def test_small_generic_cages_do_not_displace_a_profiled_shelf(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        output = fx.sesutil_map(
+            ("ses0", "ExampleCo Cage 0100", "500cccc00000002", 2, {0: "da30"}),
+            ("ses1", "LSI SAS3x40 0601", fx.FRONT_24_ID, 24, {0: "da0"}),
+            ("ses2", "ExampleCo Cage 0100", "500cccc00000004", 4, {}),
+            ("ses3", "AHCI SGPIO Enclosure 2.00", fx.AHCI_6_ID, 6, {}),
+        )
+
+        parsed = parse_ssh_outputs({"sesutil map": output}, 60, None)
+
+        self.assertEqual(parsed.ses_selected_meta["id"], fx.FRONT_24_ID)
+        self.assertEqual(len(parsed.ses_slot_candidates), 24)
+
+    def test_unknown_shelves_without_any_layout_still_stack_as_before(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        output = fx.sesutil_map(
+            ("ses0", "ExampleCo Shelf 0100", "500cccc00000010", 24, {0: "da0"}),
+            ("ses1", "ExampleCo Shelf 0100", "500cccc00000020", 24, {0: "da24"}),
+            ("ses2", "AHCI SGPIO Enclosure 2.00", fx.AHCI_6_ID, 6, {0: "ada0"}),
+        )
+
+        parsed = parse_ssh_outputs({"sesutil map": output}, 60, None)
+
+        self.assertEqual(parsed.ses_selected_meta["id"], "500cccc00000010+500cccc00000020")
+        self.assertEqual(len(parsed.ses_slot_candidates), 48)
+        self.assertNotIn("ada0", parsed.ses_slot_to_device.values())
+
+    def test_a_host_with_only_ahci_sgpio_enclosures_keeps_a_view(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        output = fx.sesutil_map(
+            ("ses0", "AHCI SGPIO Enclosure 2.00", fx.AHCI_4_ID, 4, {0: "ada0"}),
+            ("ses1", "AHCI SGPIO Enclosure 2.00", fx.AHCI_6_ID, 6, {}),
+        )
+
+        parsed = parse_ssh_outputs({"sesutil map": output}, 60, None)
+
+        # With no real shelf, the onboard SATA ports stay together as before.
+        self.assertEqual(parsed.ses_selected_meta["id"], f"{fx.AHCI_4_ID}+{fx.AHCI_6_ID}")
+        self.assertEqual(parsed.ses_slot_candidates[0]["device_names"], ["ada0"])
+        self.assertEqual(len(parsed.ses_slot_candidates), 10)
+
+    def test_zpool_status_by_device_keys_members_by_device_and_partition(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        guid_only = parse_ssh_outputs({"/usr/local/sbin/zpool status -gP": fx.ZPOOL_STATUS_GP}, 60, None)
+        # `-g` prints GUIDs only, so an SSH-only bay has nothing to match on.
+        self.assertNotIn("da0", guid_only.zpool_members)
+
+        parsed = parse_ssh_outputs(
+            {
+                "/usr/local/sbin/zpool status -gP": fx.ZPOOL_STATUS_GP,
+                "/usr/local/sbin/zpool status -LP": fx.ZPOOL_STATUS_LP,
+            },
+            60,
+            None,
+        )
+
+        members = parsed.zpool_device_members
+        for key in ("da0", "da0p2", "da5"):
+            with self.subTest(key=key):
+                self.assertEqual(members[key].pool_name, "synthpool")
+                self.assertEqual(members[key].vdev_name, "raidz2-0")
+                self.assertEqual(members[key].vdev_class, "data")
+        self.assertEqual(members["ada1"].pool_name, "boot-pool")
+        self.assertEqual(members["ada1"].vdev_name, "mirror-0")
+        # The GUID-keyed members the API match uses are left exactly as they were.
+        self.assertEqual(parsed.zpool_members, guid_only.zpool_members)
+        self.assertEqual(guid_only.zpool_device_members, {})
+
+    def test_zpool_status_by_device_command_has_its_own_parser_key(self) -> None:
+        cases = {
+            "/usr/local/sbin/zpool status -LP": "zpool status -LP",
+            "/usr/local/sbin/zpool status -LP 2>/dev/null || true": "zpool status -LP",
+            "zpool status -L -P": "zpool status -LP",
+            "/usr/local/sbin/zpool status -gP": "zpool status -gP",
+            "zpool status": "zpool status",
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(canonicalize_ssh_command(command), expected)
 
 
 class DellMd1280ProfileInferenceTests(unittest.TestCase):

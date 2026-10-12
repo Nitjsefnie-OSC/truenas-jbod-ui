@@ -33,6 +33,7 @@ from app.services.credential_authority import (
     same_credential_authority,
     ssh_credential_authorities,
 )
+from app.services.parsers import CORE_ZPOOL_STATUS_BY_DEVICE_COMMAND
 from app.services.sas_fabric import (
     CORE_DMIDECODE_SLOT_COMMAND,
     CORE_MPR_DMESG_EVENTS_COMMAND,
@@ -162,6 +163,7 @@ def default_ssh_commands_for_platform(platform: str) -> list[str]:
         return [
             "/sbin/glabel status",
             "/usr/local/sbin/zpool status -gP",
+            CORE_ZPOOL_STATUS_BY_DEVICE_COMMAND,
             "gmultipath list",
             "sudo -n /sbin/camcontrol devlist -v",
             "sudo -n /usr/sbin/sesutil map",

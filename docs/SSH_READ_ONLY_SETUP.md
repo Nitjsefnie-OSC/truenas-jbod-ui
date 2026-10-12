@@ -7,6 +7,7 @@ Give the Docker app enough SSH access to run inventory commands like:
 - `glabel status`
 - `gmultipath list`
 - `zpool status -gP`
+- `zpool status -LP`
 - `camcontrol devlist -v`
 - `sesutil map`
 - `sesutil show`
@@ -152,6 +153,7 @@ Example:
 
 ```bash
 ssh -i ./config/ssh/id_truenas jbodmap@TRUENAS_HOST 'zpool status -gP'
+ssh -i ./config/ssh/id_truenas jbodmap@TRUENAS_HOST 'zpool status -LP'
 ssh -i ./config/ssh/id_truenas jbodmap@TRUENAS_HOST 'glabel status'
 ssh -i ./config/ssh/id_truenas jbodmap@TRUENAS_HOST 'gmultipath list'
 ssh -i ./config/ssh/id_truenas jbodmap@TRUENAS_HOST 'camcontrol devlist -v'
@@ -193,6 +195,7 @@ good middle ground:
 - `/sbin/glabel status` works without sudo
 - `gmultipath list` works without sudo
 - `/usr/local/sbin/zpool status -gP` works without sudo
+- `/usr/local/sbin/zpool status -LP` works without sudo
 - `/usr/sbin/sesutil show` and `sesutil map` fail with `Permission denied`
 - `/sbin/camcontrol devlist -v` also fails with `Permission denied`
 
@@ -450,6 +453,7 @@ For this system, the preferred SSH command list is:
 commands:
   - /sbin/glabel status
   - /usr/local/sbin/zpool status -gP
+  - /usr/local/sbin/zpool status -LP
   - gmultipath list
   - sudo -n /sbin/camcontrol devlist -v
   - sudo -n /usr/sbin/sesutil map
