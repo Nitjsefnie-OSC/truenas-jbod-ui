@@ -123,6 +123,7 @@ verify the host before replacing its entry.
 ```text
 /sbin/glabel status
 /usr/local/sbin/zpool status -gP
+/usr/local/sbin/zpool status -LP
 gmultipath list
 sudo -n /usr/sbin/sesutil map
 sudo -n /usr/sbin/sesutil show

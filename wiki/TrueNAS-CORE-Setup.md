@@ -58,6 +58,7 @@ ssh:
   commands:
     - /sbin/glabel status
     - /usr/local/sbin/zpool status -gP
+    - /usr/local/sbin/zpool status -LP
     - gmultipath list
     - sudo -n /usr/sbin/sesutil map
     - sudo -n /usr/sbin/sesutil show
@@ -109,6 +110,7 @@ systems:
       commands:
         - /sbin/glabel status
         - /usr/local/sbin/zpool status -gP
+        - /usr/local/sbin/zpool status -LP
         - gmultipath list
         - sudo -n /usr/sbin/sesutil map
         - sudo -n /usr/sbin/sesutil show

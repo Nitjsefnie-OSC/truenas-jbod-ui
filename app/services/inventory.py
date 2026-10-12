@@ -14,7 +14,7 @@ from contextlib import contextmanager, nullcontext
 from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar, copy_context
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Generic, Iterable, Literal, TypeVar
 from urllib.parse import urlsplit
@@ -94,6 +94,7 @@ from app.services.sas_fabric_alias_store import SasFabricAliasStore
 from app.services.quantastor_cli import build_quantastor_cli_invocation
 from app.services.quantastor_api import QuantastorRESTClient
 from app.services.parsers import (
+    CORE_ZPOOL_STATUS_BY_DEVICE_OPTIONAL_COMMAND,
     fixed_device_sg_ses_note,
     fixed_device_sg_ses_reads,
     MultipathInfo,
@@ -4157,6 +4158,7 @@ class InventoryService:
             return unit_commands
 
         commands: list[str] = []
+        commands.extend(self._core_zpool_by_device_probe_commands(command_results))
         commands.extend(self._core_mpr_dmesg_probe_commands(command_results))
         commands.extend(self._core_pci_slot_probe_commands(command_results))
         if self._should_probe_unifi_gpio_debug(command_results):
@@ -4273,6 +4275,15 @@ class InventoryService:
             return []
         seen_commands = {canonicalize_ssh_command(item.command) for item in command_results}
         return build_core_mprutil_unit_commands(adapter_summary, seen_commands)
+
+    def _core_zpool_by_device_probe_commands(self, command_results: list[SSHCommandResult]) -> list[str]:
+        """Read pool members by device for a saved CORE command list that predates it (#948)."""
+        if self.system.truenas.platform != "core":
+            return []
+        seen_commands = {canonicalize_ssh_command(item.command) for item in command_results}
+        if "zpool status -LP" in seen_commands:
+            return []
+        return [CORE_ZPOOL_STATUS_BY_DEVICE_OPTIONAL_COMMAND]
 
     def _core_mpr_dmesg_probe_commands(self, command_results: list[SSHCommandResult]) -> list[str]:
         if self.system.truenas.platform != "core":
@@ -11796,6 +11807,7 @@ class InventoryService:
         merged = ParsedSSHData(
             glabel=base.glabel,
             zpool_members=dict(base.zpool_members),
+            zpool_device_members=dict(base.zpool_device_members),
             multipath_info=dict(base.multipath_info),
             ses_slot_to_device=dict(base.ses_slot_to_device),
             camcontrol_models=dict(base.camcontrol_models),
@@ -12369,11 +12381,7 @@ class InventoryService:
             if primary_id and primary_id not in seen_ids:
                 seen_ids.add(primary_id)
                 options.append(
-                    EnclosureOption(
-                        id=primary_id,
-                        label=normalize_text(primary_meta.get("label")) or primary_id,
-                        name=normalize_text(primary_meta.get("name")),
-                    )
+                    self._core_ssh_primary_option(ssh_data, primary_id, primary_ids, primary_meta)
                 )
             for enclosure in self._build_core_ssh_enclosure_options(
                 ssh_data,
@@ -12403,6 +12411,33 @@ class InventoryService:
             )
 
         return self._finalize_enclosure_options(options)
+
+    def _core_ssh_primary_option(
+        self,
+        ssh_data: ParsedSSHData,
+        primary_id: str,
+        primary_ids: set[str],
+        primary_meta: dict[str, Any],
+    ) -> EnclosureOption:
+        parts = list(
+            {
+                option.id: option
+                for option in (self._ses_enclosure_to_option(enclosure) for enclosure in ssh_data.ses_enclosures)
+                if option is not None and option.id in primary_ids
+            }.values()
+        )
+        if len(parts) == 1 and parts[0].id == primary_id:
+            # One shelf keeps its own inferred layout and bay count.
+            return parts[0]
+        # A shelf stacked from several SES groups reports the bays it really
+        # has, so a 44-bay stack is not drawn as the 60-bay CSE-946 (#948).
+        slot_count = sum(option.slot_count or 0 for option in parts) if len(parts) == len(primary_ids) else None
+        return EnclosureOption(
+            id=primary_id,
+            label=normalize_text(primary_meta.get("label")) or primary_id,
+            name=normalize_text(primary_meta.get("name")),
+            slot_count=slot_count or None,
+        )
 
     @staticmethod
     def _ses_enclosure_to_option(enclosure) -> EnclosureOption | None:
@@ -15458,6 +15493,13 @@ class InventoryService:
             api_member = api_topology_members.get(key)
             if api_member:
                 return api_member
+        # Without the API, `zpool status -gP` has only GUIDs to offer; the
+        # by-device read still names the pool and vdev for an SSH-only bay
+        # (#948). The device node is not a persistent ID, so it is not kept.
+        for key in candidate_keys:
+            member = ssh_data.zpool_device_members.get(key)
+            if member:
+                return replace(member, raw_name="", raw_path=None)
         return None
 
     def _disk_sas_alias_tiers(self, disk: DiskRecord) -> tuple[set[str], set[str]]:

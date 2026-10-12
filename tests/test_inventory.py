@@ -23851,6 +23851,180 @@ class InventoryDefaultRegressionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(service._candidate_matches_storage_view(pool_view, {}))
             self.assertFalse(service._candidate_matches_storage_view(unnamed_pool_view, {}))
 
+    @staticmethod
+    def _core_ssh_only_service(temp_dir: str, ssh_outputs: dict[str, str], **system_overrides) -> InventoryService:
+        """A CORE system whose API is down: everything comes from SSH (#948)."""
+        system = SystemConfig(
+            id="core-ssh-only",
+            label="Synthetic CORE",
+            truenas=TrueNASConfig(host="https://core.example.test", api_key="token", platform="core"),
+            ssh=SSHConfig(enabled=True, host="core.example.test", user="jbodmap"),
+            **system_overrides,
+        )
+        service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
+        service._get_inventory_source_bundle = AsyncMock(
+            return_value=InventorySourceBundle(
+                raw_data=TrueNASRawData(
+                    enclosures=[], disks=[], pools=[], disk_temperatures={}, smart_test_results=[],
+                ),
+                ssh_outputs=ssh_outputs,
+                ssh_collected=True,
+                warnings=[],
+                sources={
+                    "api": SourceStatus(enabled=True, ok=False, message="API unreachable"),
+                    "ssh": SourceStatus(enabled=True, ok=True),
+                },
+                scale_ses_data=ParsedSSHData(),
+                quantastor_ses_data=ParsedSSHData(),
+            )
+        )
+        return service
+
+    async def test_core_ssh_offers_each_backplane_with_its_own_layout(self) -> None:
+        from app.services.profile_registry import SCALE_SSG_REAR_12_PROFILE_ID
+        from tests import core_ses_fixtures as fx
+
+        outputs = {"sudo -n /usr/sbin/sesutil map": fx.SSG_SESUTIL_MAP}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._core_ssh_only_service(temp_dir, outputs)
+            snapshot = await service.get_snapshot(force_refresh=True)
+            rear = await service.get_snapshot(selected_enclosure_id=fx.REAR_12_ID, force_refresh=True)
+
+        self.assertEqual(
+            [(option.id, option.label, option.profile_id) for option in snapshot.enclosures],
+            [
+                (fx.FRONT_24_ID, "Front 24 Bay", SCALE_SSG_FRONT_24_PROFILE_ID),
+                (fx.REAR_12_ID, "Rear 12 Bay", SCALE_SSG_REAR_12_PROFILE_ID),
+            ],
+        )
+        self.assertEqual(snapshot.selected_enclosure_id, fx.FRONT_24_ID)
+        self.assertEqual(snapshot.selected_profile.id, SCALE_SSG_FRONT_24_PROFILE_ID)
+        self.assertEqual(len(snapshot.slots), 24)
+        self.assertEqual(
+            {slot.device_name for slot in snapshot.slots if slot.device_name},
+            {f"da{index}" for index in range(6)},
+        )
+        self.assertEqual(rear.selected_profile.id, SCALE_SSG_REAR_12_PROFILE_ID)
+        self.assertEqual(len(rear.slots), 12)
+        self.assertNotEqual(snapshot.selected_profile.id, CORE_CSE_946_PROFILE_ID)
+
+    async def test_core_ssh_two_halves_of_one_shelf_stay_one_cse_946_view(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        outputs = {"sesutil map": fx.TOP_LOADER_SESUTIL_MAP}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._core_ssh_only_service(temp_dir, outputs)
+            snapshot = await service.get_snapshot(force_refresh=True)
+
+        combined_id = f"{fx.HALF_FRONT_ID}+{fx.HALF_REAR_ID}"
+        self.assertEqual([option.id for option in snapshot.enclosures], [combined_id, fx.FRONT_24_ID])
+        combined = snapshot.enclosures[0]
+        self.assertEqual(combined.slot_count, 60)
+        self.assertEqual(snapshot.selected_enclosure_id, combined_id)
+        self.assertEqual(snapshot.selected_profile.id, CORE_CSE_946_PROFILE_ID)
+        self.assertEqual(len(snapshot.slots), 60)
+        by_slot = {slot.slot: slot for slot in snapshot.slots}
+        self.assertEqual(by_slot[0].device_name, "da10")
+        self.assertEqual(by_slot[30].device_name, "da40")
+
+    def test_a_combined_option_reports_its_real_bay_count(self) -> None:
+        """A combined shelf of other than 60 bays is never drawn as the CSE-946."""
+        service = self._bare_service()
+
+        def half(enclosure_id: str, name: str, bays: int) -> SESMapEnclosure:
+            ses_device = f"/dev/ses-{enclosure_id}"
+            return SESMapEnclosure(
+                ses_device=ses_device,
+                enclosure_id=enclosure_id,
+                enclosure_name=name,
+                slots={
+                    index: SESMapSlot(slot_number=index, element_id=index, ses_device=ses_device)
+                    for index in range(bays)
+                },
+            )
+
+        ssh_data = ParsedSSHData(
+            ses_enclosures=[half("5000dddd", "Synthetic Front", 22), half("5000eeee", "Synthetic Rear", 22)]
+        )
+        options = service._build_enclosure_options(
+            TrueNASRawData(enclosures=[], disks=[], pools=[], disk_temperatures={}, smart_test_results=[]),
+            ssh_data,
+            {"id": None, "label": None, "name": None},
+        )
+
+        combined = next(option for option in options if option.id == "5000dddd+5000eeee")
+        self.assertEqual(combined.slot_count, 44)
+        self.assertIsNone(service.profile_registry.select_profile_id(service.system, combined))
+
+    async def test_core_ssh_only_bays_show_pool_and_vdev_from_zpool_status(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        outputs = {
+            "sudo -n /usr/sbin/sesutil map": fx.SSG_SESUTIL_MAP,
+            "/usr/local/sbin/zpool status -gP": fx.ZPOOL_STATUS_GP,
+            "/usr/local/sbin/zpool status -LP": fx.ZPOOL_STATUS_LP,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._core_ssh_only_service(temp_dir, outputs)
+            snapshot = await service.get_snapshot(force_refresh=True)
+
+        placed = [slot for slot in snapshot.slots if slot.device_name]
+        self.assertEqual(len(placed), 6)
+        for slot in placed:
+            with self.subTest(device=slot.device_name):
+                self.assertEqual(slot.pool_name, "synthpool")
+                self.assertEqual(slot.vdev_name, "raidz2-0")
+                self.assertEqual(slot.vdev_class, "data")
+                # A device node is not a stable identity; it is not shown as one.
+                self.assertNotEqual(slot.gptid, f"/dev/{slot.device_name}p2")
+
+    async def test_core_page_with_the_old_combined_id_in_view_order_still_renders(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        outputs = {"sesutil map": fx.SSG_SESUTIL_MAP}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._core_ssh_only_service(
+                temp_dir,
+                outputs,
+                view_order=[f"enclosure:{fx.OLD_COMBINED_ID}", f"enclosure:{fx.REAR_12_ID}"],
+            )
+            runtime = await service.get_storage_view_runtime(force_refresh=True)
+
+        self.assertEqual(runtime.view_order[:2], [f"enclosure:{fx.REAR_12_ID}", f"enclosure:{fx.FRONT_24_ID}"])
+        self.assertNotIn(f"enclosure:{fx.OLD_COMBINED_ID}", runtime.view_order)
+
+    def test_core_defaults_read_pool_members_by_device(self) -> None:
+        from app.services.system_setup import default_ssh_commands_for_platform
+
+        commands = default_ssh_commands_for_platform("core")
+
+        self.assertIn("/usr/local/sbin/zpool status -LP", commands)
+        self.assertIn("/usr/local/sbin/zpool status -gP", commands)
+        self.assertFalse(any("zpool" in command and "sudo" in command for command in commands))
+
+    def test_saved_core_command_list_gets_the_by_device_pool_read(self) -> None:
+        service = self._bare_service()
+        gp_result = SSHCommandResult(
+            command="/usr/local/sbin/zpool status -gP", ok=True, stdout="", exit_code=0,
+        )
+
+        commands = service._core_zpool_by_device_probe_commands([gp_result])
+
+        self.assertEqual(commands, ["/usr/local/sbin/zpool status -LP 2>/dev/null || true"])
+        self.assertEqual(canonicalize_ssh_command(commands[0]), "zpool status -LP")
+        seen = SSHCommandResult(command="/usr/local/sbin/zpool status -LP", ok=True, stdout="", exit_code=0)
+        self.assertEqual(service._core_zpool_by_device_probe_commands([gp_result, seen]), [])
+        self.assertEqual(self._bare_service("scale")._core_zpool_by_device_probe_commands([gp_result]), [])
+        self.assertIn(
+            "/usr/local/sbin/zpool status -LP 2>/dev/null || true",
+            service._ssh_inventory_enrichment_probe_commands(
+                [
+                    gp_result,
+                    SSHCommandResult(command="sudo -n /usr/sbin/mprutil show adapters", ok=True, stdout="", exit_code=0),
+                ]
+            ),
+        )
+
     def test_pool_bound_boot_view_without_a_pool_name_places_its_saved_drives(self) -> None:
         service = object.__new__(InventoryService)
         storage_view = StorageViewConfig.model_validate({
