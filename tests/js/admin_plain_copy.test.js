@@ -281,3 +281,13 @@ test("the setup and maintenance view links to each of its sections (#412)", () =
     assert.ok(operationsView.includes(`id="${id}"`), `${id} must be inside the view that shows the links`);
   }
 });
+
+test("the bootstrap sudo-password field says bootstrap needs passwordless sudo (#957)", () => {
+  const field = TEMPLATE.match(/<label class="field">\s*<span>([^<]*)<\/span>\s*<input id="setup-bootstrap-sudo-password"[^>]*placeholder="([^"]*)"/);
+  assert.ok(field, "the bootstrap sudo-password field must keep a visible label and placeholder");
+  const [, label, placeholder] = field;
+  assert.doesNotMatch(label, /^Sudo password for this login$/);
+  assert.doesNotMatch(placeholder, /Only if this login needs one for sudo/);
+  assert.match(`${label} ${placeholder}`, /passwordless sudo/i);
+  assert.match(placeholder, /blank/i);
+});

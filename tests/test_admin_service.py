@@ -4892,8 +4892,8 @@ class AdminSudoPreviewRouteTests(unittest.TestCase):
             def __init__(self, config: SSHConfig) -> None:
                 self.config = config
 
-            def run_command_sync(self, command: str) -> SSHCommandResult:
-                remote_commands.append(command)
+            def run_command_sync(self, command: str, *, stdin_data: str | None = None) -> SSHCommandResult:
+                remote_commands.append(f"{command}\n{stdin_data or ''}")
                 return SSHCommandResult(
                     command=command,
                     ok=True,

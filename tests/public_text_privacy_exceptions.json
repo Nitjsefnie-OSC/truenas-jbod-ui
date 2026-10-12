@@ -360,9 +360,6 @@
       },
       "private_posix_host_path": {
         "sha256:989baf8b8d6cd45c0744bd9a210f537a81a26e6e7c9ff4ee5354e978a7211d4c": 2
-      },
-      "rfc1918_ipv4": {
-        "sha256:6afee82c6c0baca5a6edbeda9126ae22eea7e9e672bf99a1fe15e1b3410c23f3": 1
       }
     },
     "reason": "Synthetic or adversarial test literal; exact detector counts are pinned."

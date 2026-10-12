@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import json
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -17,7 +19,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from admin_service.services.account_bootstrap import (
+    SMARTCTL_SUDO_COMMANDS,
     SUDO_COMMANDS_BY_PLATFORM,
+    SUPPLEMENTAL_SUDO_COMMANDS_BY_PLATFORM,
     ServiceAccountBootstrapService,
     saved_sudo_commands_for_system,
 )
@@ -31,7 +35,7 @@ from app.services.mapping_store import MappingStore
 from app.services.profile_registry import ProfileRegistry
 from app.services.slot_detail_store import SlotDetailStore
 from app.services.ssh_key_manager import SSHKeyManager
-from app.services.ssh_probe import SSHCommandResult
+from app.services.ssh_probe import SSHCommandResult, SSHProbe
 from app.services.system_setup import default_ssh_commands_for_platform
 
 
@@ -41,12 +45,20 @@ Platform = Literal["core", "scale", "quantastor", "linux"]
 class FakeProbe:
     last_config = None
     last_command = None
+    last_stdin = None
 
     def __init__(self, config) -> None:
         type(self).last_config = config
 
-    def run_command_sync(self, command: str) -> SSHCommandResult:
+    def run_command_sync(
+        self,
+        command: str,
+        *,
+        stdin_data: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> SSHCommandResult:
         type(self).last_command = command
+        type(self).last_stdin = stdin_data
         return SSHCommandResult(
             command=command,
             ok=True,
@@ -67,6 +79,7 @@ class ServiceAccountBootstrapServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeProbe.last_config = None
         FakeProbe.last_command = None
+        FakeProbe.last_stdin = None
 
     def make_service(self, config_file: Path) -> ServiceAccountBootstrapService:
         return ServiceAccountBootstrapService(str(config_file), probe_factory=FakeProbe)
@@ -114,8 +127,8 @@ class ServiceAccountBootstrapServiceTests(unittest.TestCase):
             self.assertEqual(result["service_user"], "jbodmap")
             self.assertEqual(FakeProbe.last_config.user, "root")
             self.assertEqual(FakeProbe.last_config.password, "bootstrap-secret")
-            self.assertTrue(str(FakeProbe.last_command).startswith("/bin/sh -lc "))
-            self.assertIn("midclt call user.update", str(FakeProbe.last_command))
+            self.assertEqual(FakeProbe.last_command, "/bin/sh -s")
+            self.assertIn("midclt call user.update", str(FakeProbe.last_stdin))
             self.assertIn("not written to config.yaml", str(result["detail"]))
             self.assertEqual(result["permission_target"], "/etc/sudoers.d/truenas-jbod-ui-jbodmap")
 
@@ -185,10 +198,9 @@ class ServiceAccountBootstrapServiceTests(unittest.TestCase):
 
             payload = SystemSetupBootstrapRequest(
                 platform="scale",
-                host="10.0.0.15",
+                host="installer.example.test",
                 bootstrap_user="installer",
                 bootstrap_password="installer-secret",
-                bootstrap_sudo_password="sudo-secret",
                 service_user="jbodmap",
                 service_key_path=str(private_key_path),
             )
@@ -198,8 +210,8 @@ class ServiceAccountBootstrapServiceTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["key_source"], str(private_key_path))
             self.assertEqual(FakeProbe.last_config.user, "installer")
-            self.assertEqual(FakeProbe.last_config.sudo_password, "sudo-secret")
-            self.assertTrue(str(FakeProbe.last_command).startswith("sudo -n /bin/sh -lc "))
+            self.assertEqual(FakeProbe.last_config.sudo_password, "")
+            self.assertEqual(FakeProbe.last_command, "sudo -n /bin/sh -s")
 
     def test_build_sudoers_content_formats_wrapped_commands_cleanly(self) -> None:
         content = ServiceAccountBootstrapService._build_sudoers_content("jbodmap", "core")
@@ -359,6 +371,178 @@ class ServiceAccountBootstrapServiceTests(unittest.TestCase):
         self.assertIn("/usr/sbin/smartctl -a /dev/sda", content)
         self.assertNotIn("/usr/bin/sg_ses -p aes /dev/sg*", content)
         self.assertNotIn("sudo -n", content)
+
+
+SYNTHETIC_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISyntheticBootstrapKey synthetic-bootstrap"
+
+
+class BootstrapRemoteExecTests(unittest.TestCase):
+    """The exec string must survive any login shell, including csh for root on CORE (#947)."""
+
+    platforms: tuple[Platform, ...] = ("core", "scale", "quantastor", "linux")
+
+    def setUp(self) -> None:
+        FakeProbe.last_config = None
+        FakeProbe.last_command = None
+        FakeProbe.last_stdin = None
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.service = ServiceAccountBootstrapService(
+            str(Path(self.temp.name) / "config.yaml"),
+            probe_factory=FakeProbe,
+        )
+
+    def payload(self, platform: str, bootstrap_user: str = "root", **updates: object) -> SystemSetupBootstrapRequest:
+        return SystemSetupBootstrapRequest(
+            platform=platform,
+            host="bootstrap.example.test",
+            bootstrap_user=bootstrap_user,
+            bootstrap_password="SYNTHETIC-BOOTSTRAP",
+            service_user="jbodmap",
+            service_public_key=SYNTHETIC_PUBLIC_KEY,
+            **updates,
+        )
+
+    def test_exec_string_is_one_line_without_a_login_flag_on_every_platform(self) -> None:
+        for platform in self.platforms:
+            for bootstrap_user, expected in (("root", "/bin/sh -s"), ("installer", "sudo -n /bin/sh -s")):
+                with self.subTest(platform=platform, bootstrap_user=bootstrap_user):
+                    FakeProbe.last_command = None
+                    FakeProbe.last_stdin = None
+                    self.service.bootstrap_service_account(self.payload(platform, bootstrap_user))
+                    command = str(FakeProbe.last_command)
+                    self.assertEqual(command, expected)
+                    self.assertNotIn("\n", command)
+                    self.assertFalse(any(token.startswith("-l") for token in shlex.split(command)))
+                    script = str(FakeProbe.last_stdin)
+                    self.assertIn("set -eu", script)
+                    self.assertIn(SYNTHETIC_PUBLIC_KEY, script)
+                    self.assertTrue(script.endswith("\n"))
+
+    def test_non_root_bootstrap_with_a_sudo_password_fails_before_connecting(self) -> None:
+        payload = self.payload("scale", "installer", bootstrap_sudo_password="SYNTHETIC-BOOTSTRAP-SUDO")
+        with self.assertRaises(ValueError) as raised:
+            self.service.bootstrap_service_account(payload)
+        message = str(raised.exception)
+        self.assertIn("sudo password", message)
+        self.assertIn("passwordless sudo", message)
+        self.assertNotIn("SYNTHETIC-BOOTSTRAP-SUDO", message)
+        self.assertIsNone(FakeProbe.last_config)
+        self.assertIsNone(FakeProbe.last_command)
+
+    def test_root_bootstrap_does_not_forward_an_unused_sudo_password(self) -> None:
+        result = self.service.bootstrap_service_account(
+            self.payload("scale", "root", bootstrap_sudo_password="SYNTHETIC-BOOTSTRAP-SUDO")
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(FakeProbe.last_command, "/bin/sh -s")
+        self.assertEqual(FakeProbe.last_config.sudo_password, "")
+        self.assertNotIn("SYNTHETIC-BOOTSTRAP-SUDO", str(FakeProbe.last_stdin))
+
+    def test_probe_forwards_the_script_as_command_input(self) -> None:
+        probe = SSHProbe(
+            SSHConfig(enabled=True, host="bootstrap.example.test", user="root", strict_host_key_checking=False)
+        )
+        result = SSHCommandResult(command="/bin/sh -s", ok=True, stdout="", stderr="", exit_code=0)
+
+        @contextlib.contextmanager
+        def owned_client(_cancel):
+            yield object(), False
+
+        with (
+            patch.object(probe, "_owned_client", side_effect=owned_client),
+            patch.object(probe, "_run_single_command", return_value=result) as run_single,
+        ):
+            self.assertIs(probe.run_command_sync("/bin/sh -s", stdin_data="SYNTHETIC-SCRIPT\n"), result)
+        self.assertEqual(run_single.call_args.args[1], "/bin/sh -s")
+        self.assertEqual(run_single.call_args.kwargs["stdin_data"], "SYNTHETIC-SCRIPT\n")
+
+    def test_core_script_never_creates_accounts_outside_the_middleware(self) -> None:
+        for install_sudo_rules in (True, False):
+            with self.subTest(install_sudo_rules=install_sudo_rules):
+                script = self.service._build_remote_script(
+                    self.payload("core", install_sudo_rules=install_sudo_rules),
+                    SYNTHETIC_PUBLIC_KEY,
+                )
+                self.assertNotIn("useradd", script)
+                self.assertNotRegex(script, r"(?m)^\s*pw\s")
+                lookup = script.index("midclt call user.query")
+                for change in ("mkdir ", "touch ", "chmod ", "chown ", ">>"):
+                    self.assertLess(lookup, script.index(change), change)
+        script = self.service._build_remote_script(self.payload("core"), SYNTHETIC_PUBLIC_KEY)
+        self.assertIn('midclt call user.update "$svc_id"', script)
+        linux = self.service._build_remote_script(self.payload("linux"), SYNTHETIC_PUBLIC_KEY)
+        self.assertIn('useradd -m -s "$svc_shell" "$svc_user"', linux)
+
+    def run_core_script(self, query_output: str) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
+        """Run the real CORE exec string and script against recording stubs.
+
+        Every command that could change the host is a stub that only logs its
+        call. When a csh is installed the exec string goes through it, as it
+        does for root on TrueNAS CORE.
+        """
+        root = Path(self.temp.name)
+        stubs = root / "bin"
+        stubs.mkdir()
+        calls = root / "calls.log"
+        midclt_input = root / "midclt.stdin"
+        (stubs / "midclt").write_text(
+            "#!/bin/sh\n"
+            'printf "midclt %s\\n" "$*" >> "$CALL_LOG"\n'
+            'cat >> "$MIDCLT_INPUT"\n'
+            'if [ "$2" = user.query ]; then printf "%s\\n" "$QUERY_OUTPUT"; fi\n'
+        )
+        for name in ("mkdir", "touch", "chmod", "chown", "pw", "useradd", "id"):
+            (stubs / name).write_text('#!/bin/sh\nprintf "%s %s\\n" "${0##*/}" "$*" >> "$CALL_LOG"\n')
+        for stub in stubs.iterdir():
+            stub.chmod(0o755)
+        payload = self.payload("core")
+        command = self.service._build_bootstrap_command(payload)
+        script = self.service._build_remote_script(payload, SYNTHETIC_PUBLIC_KEY)
+        csh = shutil.which("csh") or shutil.which("tcsh")
+        argv = [csh, "-f", "-c", command] if csh else ["/bin/sh", "-c", command]
+        completed = subprocess.run(
+            argv,
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": f"{stubs}:/usr/bin:/bin",
+                "HOME": str(root),
+                "LC_ALL": "C",
+                "CALL_LOG": str(calls),
+                "MIDCLT_INPUT": str(midclt_input),
+                "QUERY_OUTPUT": query_output,
+            },
+        )
+        logged = calls.read_text().splitlines() if calls.exists() else []
+        received = midclt_input.read_text() if midclt_input.exists() else ""
+        return completed, logged, received
+
+    def assert_only_the_account_lookup_ran(self, completed, logged, received) -> None:
+        self.assertNotEqual(completed.returncode, 0, completed.stdout)
+        self.assertIn("Nothing was changed on the host.", completed.stderr)
+        self.assertNotIn("BOOTSTRAP_", completed.stdout)
+        self.assertEqual(len(logged), 1, logged)
+        self.assertTrue(logged[0].startswith("midclt call user.query "), logged)
+        self.assertIn('"select"', logged[0])
+        # Commands the script runs must not read the rest of the script from stdin.
+        self.assertEqual(received, "")
+
+    def test_core_missing_service_user_fails_closed_before_any_change(self) -> None:
+        completed, logged, received = self.run_core_script("[]")
+        self.assert_only_the_account_lookup_ran(completed, logged, received)
+        for text in ("jbodmap", "Accounts > Users", "/mnt", "shell sh", "Disable Password", "public key"):
+            self.assertIn(text, completed.stderr)
+
+    def test_core_service_user_without_a_mnt_home_fails_closed_before_any_change(self) -> None:
+        completed, logged, received = self.run_core_script(
+            '[{"id": 54, "username": "jbodmap", "home": "/nonexistent"}]'
+        )
+        self.assert_only_the_account_lookup_ran(completed, logged, received)
+        self.assertIn("/nonexistent", completed.stderr)
+        self.assertIn("/mnt", completed.stderr)
 
 
 class BootstrapPolicyEvidenceTests(unittest.TestCase):
@@ -541,6 +725,69 @@ def strip_sudo_prefix(command: str) -> str | None:
     return shlex.join(remainder)
 
 
+CORE_ABSENT_SMARTCTL_PREFIX = "/usr/sbin/smartctl "
+CORE_SMART_ALLOWED = (
+    "/usr/local/sbin/smartctl -x -j /dev/da0",
+    "/usr/local/sbin/smartctl -x /dev/da92",
+    "/usr/local/sbin/smartctl -x -j /dev/multipath/disk7",
+    "/usr/local/sbin/smartctl -x /dev/multipath/disk7",
+    "/usr/local/sbin/smartctl -x -j /dev/nvd0",
+    "/usr/local/sbin/smartctl -x -j /dev/ada1",
+)
+CORE_SMART_REFUSED = (
+    "/usr/local/sbin/smartctl -x -t long /dev/da0",
+    "/usr/local/sbin/smartctl -x -s wcache,off /dev/da0",
+    "/usr/local/sbin/smartctl -x -j /dev/da0 -t short",
+    "/usr/local/sbin/smartctl -x -j /dev/../etc/master.passwd",
+    "/usr/local/sbin/smartctl -x -j /dev/a/b/c/d",
+)
+
+
+def middleware_stored_grant(grant: str) -> str:
+    """Mirror TrueNAS CORE 13.0 ``sudoers.mako``: backslash-escape \\ , : and =."""
+
+    for character in ("\\", ",", ":", "="):
+        grant = grant.replace(character, "\\" + character)
+    return grant
+
+
+def core_stored_grant_matches(grant: str, command: str) -> bool:
+    """Match a CORE grant the way sudo sees it once the middleware has stored it.
+
+    Python ``re`` stands in for sudo's POSIX ERE. The middleware's backslashes
+    reach the regex unchanged, so ``{0\\,2}`` is no longer an interval (#943).
+    The sudoers parser removes them from literal arguments.
+    """
+
+    stored = middleware_stored_grant(grant)
+    path, _, arguments = stored.partition(" ")
+    command_tokens = shlex.split(command)
+    if not command_tokens or path != command_tokens[0]:
+        return False
+    command_arguments = " ".join(command_tokens[1:])
+    if arguments.startswith("^") and arguments.endswith("$"):
+        pattern = arguments.replace("[[]", r"\[").replace("[]]", r"\]")
+        try:
+            return re.fullmatch(pattern, command_arguments) is not None
+        except re.error:
+            return False
+    return fnmatch.fnmatchcase(command_arguments, re.sub(r"\\(.)", r"\1", arguments))
+
+
+def grant_covers(platform: str, grants, command: str) -> bool:
+    matcher = core_stored_grant_matches if platform == "core" else sudoers_grant_matches
+    return any(matcher(grant, command) for grant in grants)
+
+
+def core_grant_sources() -> dict[str, tuple[str, ...]]:
+    payload = json.loads(ServiceAccountBootstrapService._build_core_midclt_user_update_payload())
+    return {
+        "seeded": SUDO_COMMANDS_BY_PLATFORM["core"],
+        "supplemental": SUPPLEMENTAL_SUDO_COMMANDS_BY_PLATFORM["core"],
+        "user.update payload": tuple(payload["sudo_commands"]),
+    }
+
+
 class BootstrapSudoGrantContractTests(unittest.IsolatedAsyncioTestCase):
     """Bootstrap grants must cover the sudo-run builders for every SSH platform."""
 
@@ -659,7 +906,7 @@ class BootstrapSudoGrantContractTests(unittest.IsolatedAsyncioTestCase):
                     await service._fetch_smart_summary_over_ssh(
                         ["sda"],
                         hosts=[host] if platform == "quantastor" else None,
-                        device_type=LINUX_BOOT_MEDIA_SMARTCTL_DEVICE_TYPE,
+                        device_type=None if platform == "core" else LINUX_BOOT_MEDIA_SMARTCTL_DEVICE_TYPE,
                     )
 
             # Identify control uses sesutil on CORE and sg_ses elsewhere.
@@ -689,17 +936,26 @@ class BootstrapSudoGrantContractTests(unittest.IsolatedAsyncioTestCase):
             if (stripped := strip_sudo_prefix(command)) is not None
         }
         self.assertTrue(sudo_commands, f"no sudo-run {platform} commands were captured")
+        # CORE disks never carry a SMART device type; only Linux boot media do (#943).
+        type_arguments = "" if platform == "core" else f"-d {LINUX_BOOT_MEDIA_SMARTCTL_DEVICE_TYPE} "
         for smartctl_binary in smartctl_binaries:
             self.assertIn(
-                f"{smartctl_binary} -d scsi -x -j /dev/sda",
+                f"{smartctl_binary} {type_arguments}-x -j /dev/sda",
                 sudo_commands,
                 f"typed SMART JSON builder was not exercised for {platform}",
             )
             self.assertIn(
-                f"{smartctl_binary} -d scsi -x /dev/sda",
+                f"{smartctl_binary} {type_arguments}-x /dev/sda",
                 sudo_commands,
                 f"typed SMART text builder was not exercised for {platform}",
             )
+        if platform == "core":
+            # CORE installs smartctl only under /usr/local/sbin. The inventory's
+            # /usr/sbin fallback cannot run there, and the middleware refuses a
+            # grant that names a missing executable.
+            sudo_commands = {
+                command for command in sudo_commands if not command.startswith(CORE_ABSENT_SMARTCTL_PREFIX)
+            }
         return sudo_commands
 
     async def test_bootstrap_grants_cover_every_sudo_run_platform_command(self) -> None:
@@ -709,7 +965,7 @@ class BootstrapSudoGrantContractTests(unittest.IsolatedAsyncioTestCase):
                 ungranted = sorted(
                     command
                     for command in await self.collect_sudo_commands(platform)
-                    if not any(sudoers_grant_matches(grant, command) for grant in grants)
+                    if not grant_covers(platform, grants, command)
                 )
                 self.assertEqual(
                     ungranted,
@@ -735,7 +991,7 @@ class BootstrapSudoGrantContractTests(unittest.IsolatedAsyncioTestCase):
                 ungranted = sorted(
                     command
                     for command in sudo_commands
-                    if not any(sudoers_grant_matches(grant, command) for grant in grants)
+                    if not grant_covers(platform, grants, command)
                 )
                 self.assertEqual(
                     ungranted,
@@ -865,6 +1121,40 @@ class BootstrapSudoGrantContractTests(unittest.IsolatedAsyncioTestCase):
         for command in rejected:
             with self.subTest(command=command):
                 self.assertFalse(any(sudoers_grant_matches(grant, command) for grant in grants))
+
+    def test_core_regex_grants_hold_nothing_the_middleware_escapes_inside_a_regex(self) -> None:
+        for source, grants in core_grant_sources().items():
+            for grant in grants:
+                arguments = grant.partition(" ")[2]
+                if not (arguments.startswith("^") and arguments.endswith("$")):
+                    continue
+                with self.subTest(source=source, grant=grant):
+                    self.assertNotIn("\\", grant)
+                    self.assertNotIn(":", grant)
+                    self.assertNotRegex(arguments, r"[{}]", "the comma of an interval is stored as \\,")
+                    for expression in re.findall(r"\[\]?[^\]]*\]", arguments):
+                        self.assertNotIn(",", expression)
+
+    def test_core_smart_grants_still_match_after_middleware_escaping(self) -> None:
+        for source, grants in core_grant_sources().items():
+            for command in CORE_SMART_ALLOWED:
+                with self.subTest(source=source, allowed=command):
+                    self.assertTrue(any(core_stored_grant_matches(grant, command) for grant in grants))
+            for command in CORE_SMART_REFUSED:
+                with self.subTest(source=source, refused=command):
+                    self.assertFalse(any(core_stored_grant_matches(grant, command) for grant in grants))
+
+    def test_core_smart_grants_name_only_the_core_binary_without_device_types(self) -> None:
+        for source, grants in core_grant_sources().items():
+            smart = [grant for grant in grants if Path(grant.split()[0]).name == "smartctl"]
+            with self.subTest(source=source):
+                self.assertTrue(smart)
+                self.assertTrue(all(grant.startswith("/usr/local/sbin/smartctl ^-x ") for grant in smart), smart)
+        # File-based platforms keep the shared form; visudo parses it there.
+        for platform in ("scale", "linux", "quantastor"):
+            with self.subTest(platform=platform):
+                for grant in SMARTCTL_SUDO_COMMANDS:
+                    self.assertIn(grant, SUDO_COMMANDS_BY_PLATFORM[platform])
 
     def test_quantastor_bootstrap_does_not_grant_unbounded_root_cli_access(self) -> None:
         self.assertFalse(

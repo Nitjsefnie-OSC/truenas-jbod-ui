@@ -497,6 +497,7 @@ class SSHProbe:
         self,
         command: str,
         *,
+        stdin_data: str | None = None,
         timeout_seconds: float | None = None,
     ) -> SSHCommandResult:
         if not self.config.enabled:
@@ -506,7 +507,7 @@ class SSHProbe:
                 stderr="SSH fallback is disabled.",
                 exit_code=1,
             )
-        return self._run_command_sync(command, timeout_seconds=timeout_seconds)
+        return self._run_command_sync(command, stdin_data=stdin_data, timeout_seconds=timeout_seconds)
 
     def _run_commands_sync(
         self,
@@ -698,6 +699,7 @@ class SSHProbe:
         self,
         command: str,
         *,
+        stdin_data: str | None = None,
         timeout_seconds: float | None = None,
         _cancel: _WorkerCancellation | None = None,
     ) -> SSHCommandResult:
@@ -707,6 +709,7 @@ class SSHProbe:
                 return self._run_single_command(
                     client,
                     command,
+                    stdin_data=stdin_data,
                     timeout_seconds=timeout_seconds,
                     _cancel=_cancel,
                 )

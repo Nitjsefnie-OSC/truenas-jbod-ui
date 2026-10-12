@@ -42,6 +42,11 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 - A storage-view disk whose pool member was DEGRADED or FAULTED was drawn
   Fault instead of Healthy, and a TrueNAS pool that was not ONLINE was named
   in the page warnings (#956).
+- The TrueNAS CORE one-time bootstrap ran its script through
+  `/bin/sh -lc` and created missing users with `pw useradd`. It now sends the
+  script on stdin, stops before any change when the CORE account is missing or
+  its home is not under `/mnt`, and stores SMART grants that still match after
+  the middleware escapes commas (#957).
 
 ## v0.24.0-beta.3 - 2026-10-11
 

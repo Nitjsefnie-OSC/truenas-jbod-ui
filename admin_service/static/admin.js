@@ -4190,7 +4190,7 @@
     if (elements.setupBootstrapCopy) {
       elements.setupBootstrapCopy.textContent = bootstrapSupported
         ? platform === "core"
-          ? "Log in once as root to create a limited user for this app, install its key and give it the TrueNAS permissions shown below. Root's password is not saved."
+          ? "Create the app's user in the CORE web UI first (Accounts > Users: home under /mnt, shell sh, Disable Password, this app's public key). Then log in once as root here to install its key and give it the TrueNAS permissions shown below. Root's password is not saved."
           : "Log in once as root to create a limited user for this app, install its key and allow only the commands it needs. Root's password is not saved."
         : ipmiOnly
           ? "Not needed for a management-controller-only system. Add SSH later if you want SMART details or bay positions."
