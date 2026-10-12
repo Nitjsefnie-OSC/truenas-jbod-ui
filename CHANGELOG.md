@@ -62,6 +62,11 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 - A view added from the AOC-SLG4-2H8M2 template now shows on the main page and
   gets the ESXi RAID member IDs only on ESXi, and a 2x M.2 carrier (passive)
   template was added for plain two-slot cards (#963).
+- System Setup no longer pins an expired or not-yet-valid certificate or turns
+  certificate checks on for a bundle that failed validation. It shows the
+  saved bundle's real failure after a reload and marks the API key for
+  re-entry when TLS settings change, and the main page names a failed
+  certificate check instead of calling the API unreachable (#965).
 
 ## v0.24.0-beta.3 - 2026-10-11
 

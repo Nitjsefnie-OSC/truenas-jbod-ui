@@ -204,6 +204,8 @@ test("loading a saved system paints the storage-view panel once, not four times"
       recommendedSshUserForPlatform: () => "jbodmap",
       loadSshCommandState: stub("loadSshCommandState"),
       syncTlsTrustStatus: stub("syncTlsTrustStatus"),
+      syncApiSecretReentry: stub("syncApiSecretReentry"),
+      refreshSavedTlsTrustStatus: async () => {},
       renderSshKeyOptions: stub("renderSshKeyOptions"),
       applySelectedKey: stub("applySelectedKey"),
       syncPlatformHelp: stub("syncPlatformHelp"),
