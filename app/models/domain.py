@@ -946,6 +946,9 @@ class StorageViewRuntimeView(BaseModel):
     template_label: str | None = None
     slot_layout: list[list[int | None]] = Field(default_factory=list)
     source: Literal["selected_enclosure_snapshot", "inventory_binding"] = "inventory_binding"
+    # A chassis view with its own saved layout. False means it follows the
+    # system's layout (the generated Primary Chassis, for example) (#953).
+    profile_pinned: bool = False
     backing_enclosure_id: str | None = None
     backing_enclosure_label: str | None = None
     notes: list[str] = Field(default_factory=list)
@@ -1015,6 +1018,8 @@ class SystemSetupRequest(BaseModel):
     bmc_timeout_seconds: int = 15
     default_profile_id: str | None = None
     storage_views: list[StorageViewRequest] | None = None
+    # None keeps the saved value; False stops generated storage views (#953).
+    auto_storage_views: bool | None = None
     view_order: list[str] | None = None
     replace_existing: bool = False
     make_default: bool = False

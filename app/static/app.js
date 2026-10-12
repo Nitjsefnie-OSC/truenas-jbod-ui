@@ -647,7 +647,12 @@
   }
 
   function storageViewKindLabel(view) {
-    return isSavedChassisView(view) ? "Saved view" : "Storage view";
+    // A chassis view that follows the system's layout (the generated Primary
+    // Chassis, for example) is not a saved layout of its own (#953).
+    if (isSavedChassisView(view)) {
+      return view?.profile_pinned === false ? "Chassis" : "Saved view";
+    }
+    return "Storage view";
   }
 
   function selectorLabelForStorageViewOption(view) {

@@ -56,6 +56,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   said "Empty" for an empty NVMe slot, did not offer locate lights on a view
   without them, and dropped "Previous version unknown" on a first start
   (#958).
+- Admin no longer saves the generated Primary Chassis with the layout it picked
+  before one was chosen; it follows the system's Chassis layout, stays deleted
+  once removed, and the main page labels it Chassis, not Saved view (#959).
 
 ## v0.24.0-beta.3 - 2026-10-11
 
