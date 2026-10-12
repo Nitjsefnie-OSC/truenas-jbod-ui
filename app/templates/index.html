@@ -298,7 +298,8 @@
       <div class="summary-card">
         <span class="summary-label">Enclosures</span>
         <span class="summary-value" id="summary-enclosure-count">{{ snapshot.summary.enclosure_count }}</span>
-        <span class="summary-note">reported by TrueNAS</span>
+        {%- set enclosure_source_notes = {"truenas": "reported by TrueNAS", "ssh": "found over SSH", "truenas_and_ssh": "reported by TrueNAS and found over SSH", "quantastor": "reported by QuantaStor", "layout": "from the enclosure layout"} %}
+        <span class="summary-note" id="summary-enclosure-source">{{ enclosure_source_notes.get(snapshot.summary.enclosure_source, "reported by TrueNAS") }}</span>
       </div>
       <div class="summary-card">
         <span class="summary-label">Bays with a disk</span>

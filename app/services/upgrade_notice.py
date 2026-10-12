@@ -70,7 +70,8 @@ BASIC_MODE_NOTICE = "Sign-in is required to change bay assignments and lights. R
 
 
 def notice_text(version: str, *, previous: str | None = None, auth_mode: str = "network") -> str:
-    prefix = f"Updated to v{version}." if previous else f"Running v{version}. Previous version unknown."
+    # A first start has no previous version to name (#950).
+    prefix = f"Updated to v{version}." if previous else f"Running v{version}."
     details = [VERSION_NOTICES.get(version, "")]
     if auth_mode == "network":
         details.append(NETWORK_MODE_NOTICE)

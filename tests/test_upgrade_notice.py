@@ -233,6 +233,21 @@ class UpgradeNoticeServiceTests(unittest.TestCase):
                     upgrade_notice.dismiss_notice(data_dir, notice_version="0.23.0", version="0.23.0")
                 self.assertEqual(path.read_bytes(), before)
 
+    def test_first_start_names_only_the_running_version(self) -> None:
+        """A first start has no previous version to report (#950)."""
+        self.assertEqual(
+            upgrade_notice.notice_text("0.24.0", previous=None, auth_mode="basic"),
+            "Running v0.24.0.",
+        )
+        self.assertEqual(
+            upgrade_notice.notice_text("0.24.0", previous="", auth_mode="network"),
+            f"Running v0.24.0. {upgrade_notice.NETWORK_MODE_NOTICE}",
+        )
+        self.assertEqual(
+            upgrade_notice.notice_text("0.24.0", previous="0.23.0", auth_mode="basic"),
+            "Updated to v0.24.0.",
+        )
+
     def test_absent_record_reports_unknown_previous_even_for_fresh_install(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
@@ -240,7 +255,7 @@ class UpgradeNoticeServiceTests(unittest.TestCase):
             notice = upgrade_notice.current_notice(data_dir, version="0.23.0")
             self.assertIsNotNone(notice)
             self.assertEqual(notice["previous"], "")
-            self.assertIn("Previous version unknown", notice["text"])
+            self.assertTrue(notice["text"].startswith("Running v0.23.0."), notice["text"])
             self.assertNotIn("Updated to", notice["text"])
             self.assertEqual(upgrade_notice.current_notice(data_dir, version="0.23.0"), notice)
             self.assertTrue(
@@ -261,7 +276,8 @@ class UpgradeNoticeServiceTests(unittest.TestCase):
             notice = upgrade_notice.current_notice(data_dir, version="0.23.0")
             self.assertIsNotNone(notice)
             self.assertEqual(notice["previous"], "")
-            self.assertIn("Running v0.23.0. Previous version unknown.", notice["text"])
+            self.assertTrue(notice["text"].startswith("Running v0.23.0."), notice["text"])
+            self.assertNotIn("Previous version unknown", notice["text"])
             self.assertEqual(mapping_path.read_bytes(), before)
 
     def test_invalid_record_shapes_report_unknown_previous(self) -> None:
@@ -272,7 +288,7 @@ class UpgradeNoticeServiceTests(unittest.TestCase):
                 notice = upgrade_notice.current_notice(data_dir, version="0.23.0")
                 self.assertIsNotNone(notice)
                 self.assertEqual(notice["previous"], "")
-                self.assertIn("Previous version unknown", notice["text"])
+                self.assertTrue(notice["text"].startswith("Running v0.23.0."), notice["text"])
 
     def test_pending_text_tracks_auth_mode_changes_without_persisting_auth(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -389,7 +405,7 @@ class UpgradeNoticeServiceTests(unittest.TestCase):
 
             notice = upgrade_notice.current_notice(data_dir, version="0.23.0")
             self.assertIsNotNone(notice)
-            self.assertIn("Previous version unknown", notice["text"])
+            self.assertTrue(notice["text"].startswith("Running v0.23.0."), notice["text"])
             self.assertEqual(notice["previous"], "")
 
     def test_invalid_utf8_record_reports_unknown_previous_and_persists(self) -> None:
@@ -401,7 +417,8 @@ class UpgradeNoticeServiceTests(unittest.TestCase):
 
             self.assertIsNotNone(notice)
             self.assertEqual(notice["previous"], "")
-            self.assertIn("Running v0.23.0. Previous version unknown.", notice["text"])
+            self.assertTrue(notice["text"].startswith("Running v0.23.0."), notice["text"])
+            self.assertNotIn("Previous version unknown", notice["text"])
             self.assertNotIn("Updated to", notice["text"])
             self.assertEqual(read_state(data_dir), {
                 "last_seen_version": "0.23.0",

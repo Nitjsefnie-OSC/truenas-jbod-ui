@@ -97,7 +97,8 @@ test("basic notice: local failures preserve drafts, install dismissal survives c
     const page = await openPage(a, server.origin);
     const other = await openPage(b, server.origin);
     await expect(page.locator("#upgrade-notice")).toHaveCount(1);
-    await expect(page.locator("#upgrade-notice-text")).toContainText(`Running v${APP_VERSION}. Previous version unknown`);
+    await expect(page.locator("#upgrade-notice-text")).toContainText(`Running v${APP_VERSION}.`);
+    await expect(page.locator("#upgrade-notice-text")).not.toContainText("Previous version unknown");
     // Basic mode never shows the network-mode write warning. The v0.23.0-only
     // sign-in sentence is pinned in tests/test_upgrade_notice.py.
     await expect(page.locator("#upgrade-notice-text")).not.toContainText("In network mode");
@@ -111,7 +112,7 @@ test("basic notice: local failures preserve drafts, install dismissal survives c
     expect((await a.request.post(`${server.origin}/api/upgrade-notice/dismiss`)).status()).toBe(401);
     await page.reload();
     await expect(page.locator("#upgrade-notice-dismiss")).toHaveText("Retry saving dismissal");
-    await expect(other.locator("#upgrade-notice-text")).toContainText("Previous version unknown");
+    await expect(other.locator("#upgrade-notice-text")).toContainText(`Running v${APP_VERSION}.`);
     console.log("notice QA: anonymous refusal and reload verified");
     await signIn(page);
     console.log("notice QA: signed in");
@@ -126,7 +127,7 @@ test("basic notice: local failures preserve drafts, install dismissal survives c
     await expect(draft).toHaveValue("synthetic-unsaved-draft");
     expect(fs.readFileSync(path.join(directory, "last_seen_version.json"), "utf8")).toBe(pendingBytes);
     await other.reload();
-    await expect(other.locator("#upgrade-notice-text")).toContainText("Previous version unknown");
+    await expect(other.locator("#upgrade-notice-text")).toContainText(`Running v${APP_VERSION}.`);
     fs.unlinkSync(path.join(directory, "fail-write"));
     await dismiss(page, 200);
     await expect(page.locator("#upgrade-notice")).toBeHidden();
@@ -165,7 +166,7 @@ test("network notice: uninstrumented install, real 403 refusal, and later versio
     server = await startServer(directory, "network");
     context = await browser.newContext();
     const page = await openPage(context, server.origin);
-    await expect(page.locator("#upgrade-notice-text")).toContainText("Previous version unknown");
+    await expect(page.locator("#upgrade-notice-text")).toContainText(`Running v${APP_VERSION}.`);
     await expect(page.locator("#upgrade-notice-text")).toContainText("In network mode, anyone who can reach");
     await page.route("**/api/upgrade-notice/dismiss", async (route) => {
       const response = await route.fetch({

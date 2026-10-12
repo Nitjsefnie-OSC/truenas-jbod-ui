@@ -51,7 +51,7 @@
     "test_history_service": 334,
     "test_image_upgrade_contract": 47,
     "test_immutable_deployment": 22,
-    "test_inventory": 536,
+    "test_inventory": 541,
     "test_inventory_registry_routes": 15,
     "test_jbod_runner_trial": 15,
     "test_logging_config": 17,
@@ -115,7 +115,7 @@
     "test_truenas_ws_jsonrpc": 52,
     "test_ui_health_and_admin_probe": 72,
     "test_unittest_shards": 15,
-    "test_upgrade_notice": 23,
+    "test_upgrade_notice": 24,
     "test_wiki_drift_verifier": 21
   }
 }
