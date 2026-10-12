@@ -18,17 +18,23 @@ from app.config import TrueNASConfig
 from app.services.tls_context import build_tls_client_context, resolve_tls_server_name, urlopen_with_tls_config
 
 
-def build_self_signed_pem(common_name: str) -> str:
+def build_self_signed_pem(
+    common_name: str,
+    *,
+    not_valid_before: datetime | None = None,
+    not_valid_after: datetime | None = None,
+) -> str:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.now(timezone.utc)
     certificate = (
         x509.CertificateBuilder()
         .subject_name(name)
         .issuer_name(name)
         .public_key(private_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
-        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+        .not_valid_before(not_valid_before or now - timedelta(days=1))
+        .not_valid_after(not_valid_after or now + timedelta(days=30))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .add_extension(
             x509.SubjectAlternativeName([x509.DNSName(common_name)]),
@@ -265,6 +271,132 @@ class TLSTrustStoreServiceTests(unittest.TestCase):
             timeout_seconds=7,
             tls_server_name=None,
         )
+
+
+def _der_from_pem(pem_text: str) -> bytes:
+    return x509.load_pem_x509_certificate(pem_text.encode("utf-8")).public_bytes(serialization.Encoding.DER)
+
+
+class TLSCertificateValidityWindowTests(unittest.TestCase):
+    """#954: an expired or not-yet-valid leaf is flagged, and trust refuses it."""
+
+    def setUp(self) -> None:
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.config_path = self.temp_dir / "config.yaml"
+        self.config_path.write_text("systems: []\n", encoding="utf-8")
+        self.service = TLSTrustStoreService(str(self.config_path))
+        now = datetime.now(timezone.utc)
+        self.expired_pem = build_self_signed_pem(
+            "truenas.example.test",
+            not_valid_before=now - timedelta(days=400),
+            not_valid_after=now - timedelta(days=35),
+        )
+        self.future_pem = build_self_signed_pem(
+            "truenas.example.test",
+            not_valid_before=now + timedelta(days=20),
+            not_valid_after=now + timedelta(days=400),
+        )
+        self.current_pem = build_self_signed_pem("truenas.example.test")
+
+    def _inspect(self, pem_text: str) -> dict:
+        with patch("admin_service.services.tls_trust.socket.create_connection") as create_connection, patch.object(
+            ssl.SSLContext, "wrap_socket"
+        ) as wrap_socket:
+            raw_socket = MagicMock()
+            raw_socket.__enter__.return_value = raw_socket
+            raw_socket.__exit__.return_value = False
+            create_connection.return_value = raw_socket
+            tls_socket = MagicMock()
+            tls_socket.__enter__.return_value = tls_socket
+            tls_socket.__exit__.return_value = False
+            tls_socket.get_unverified_chain.return_value = [_der_from_pem(pem_text)]
+            wrap_socket.return_value = tls_socket
+            return self.service.inspect_remote_certificate("https://truenas.example.test", timeout_seconds=5)
+
+    def test_inspection_flags_an_expired_leaf(self) -> None:
+        leaf = self._inspect(self.expired_pem)["leaf"]
+
+        self.assertIs(leaf["expired"], True)
+        self.assertIs(leaf["not_yet_valid"], False)
+        self.assertTrue(leaf["not_valid_before"])
+        self.assertTrue(leaf["not_valid_after"])
+
+    def test_inspection_flags_a_not_yet_valid_leaf(self) -> None:
+        leaf = self._inspect(self.future_pem)["leaf"]
+
+        self.assertIs(leaf["expired"], False)
+        self.assertIs(leaf["not_yet_valid"], True)
+
+    def test_inspection_reports_a_current_leaf_as_valid(self) -> None:
+        leaf = self._inspect(self.current_pem)["leaf"]
+
+        self.assertIs(leaf["expired"], False)
+        self.assertIs(leaf["not_yet_valid"], False)
+
+    def test_trust_refuses_an_expired_leaf_without_saving_it(self) -> None:
+        with patch.object(TLSTrustStoreService, "validate_bundle_for_host") as validate_bundle_for_host:
+            with patch("admin_service.services.tls_trust.socket.create_connection") as create_connection, patch.object(
+                ssl.SSLContext, "wrap_socket"
+            ) as wrap_socket:
+                raw_socket = MagicMock()
+                raw_socket.__enter__.return_value = raw_socket
+                raw_socket.__exit__.return_value = False
+                create_connection.return_value = raw_socket
+                tls_socket = MagicMock()
+                tls_socket.__enter__.return_value = tls_socket
+                tls_socket.__exit__.return_value = False
+                tls_socket.get_unverified_chain.return_value = [_der_from_pem(self.expired_pem)]
+                wrap_socket.return_value = tls_socket
+                with self.assertRaises(ValueError) as raised:
+                    self.service.trust_remote_certificate(
+                        "https://truenas.example.test",
+                        timeout_seconds=5,
+                        system_id="synthetic-core",
+                    )
+
+        message = str(raised.exception)
+        self.assertIn("expired on", message)
+        self.assertIn("Renew it on the server", message)
+        validate_bundle_for_host.assert_not_called()
+        self.assertFalse((self.temp_dir / "tls").exists(), "an expired leaf must not be written to the trust store")
+
+    def test_trust_refuses_a_not_yet_valid_leaf_without_saving_it(self) -> None:
+        with patch.object(TLSTrustStoreService, "inspect_remote_certificate") as inspect_remote_certificate, patch.object(
+            TLSTrustStoreService, "import_pem_bundle"
+        ) as import_pem_bundle:
+            certificate = x509.load_pem_x509_certificate(self.future_pem.encode("utf-8"))
+            inspect_remote_certificate.return_value = {
+                "host": "https://truenas.example.test",
+                "pem_chain": self.future_pem,
+                "leaf": TLSTrustStoreService._serialize_certificate(certificate),
+            }
+            with self.assertRaises(ValueError) as raised:
+                self.service.trust_remote_certificate("https://truenas.example.test")
+
+        self.assertIn("not valid until", str(raised.exception))
+        import_pem_bundle.assert_not_called()
+
+    @patch("admin_service.services.tls_trust.socket.create_connection")
+    @patch("admin_service.services.tls_trust.build_tls_client_context")
+    def test_validate_bundle_reports_an_unloadable_bundle_as_a_failed_check(
+        self,
+        build_tls_client_context_mock: MagicMock,
+        create_connection: MagicMock,
+    ) -> None:
+        from app.services.tls_context import TlsTrustConfigurationError
+
+        bundle_path = self.temp_dir / "tls" / "synthetic-core.pem"
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_path.write_text("not a certificate\n", encoding="utf-8")
+        build_tls_client_context_mock.side_effect = TlsTrustConfigurationError(
+            str(bundle_path), ssl.SSLError("synthetic malformed bundle")
+        )
+
+        result = self.service.validate_bundle_for_host("https://truenas.example.test", str(bundle_path))
+
+        self.assertFalse(result["validated"])
+        self.assertIn("could not be loaded", result["detail"])
+        create_connection.assert_not_called()
 
 
 class TLSContextTests(unittest.TestCase):
