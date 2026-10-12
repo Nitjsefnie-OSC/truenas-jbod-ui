@@ -382,6 +382,7 @@ const SAVED_WITH_KEY = {
 
 test("changing a TLS field on a saved system marks the stored API key for re-entry", () => {
   for (const change of [
+    (elements) => { elements.setupPlatform.value = "scale"; },
     (elements) => { elements.setupVerifySsl.checked = false; },
     (elements) => { elements.setupTlsCaBundlePath.value = "/synthetic/tls/other.pem"; },
     (elements) => { elements.setupTlsServerName.value = "truenas.example.test"; },
@@ -434,7 +435,7 @@ test("reverting the TLS change restores the saved-key placeholder", () => {
   assert.equal(harness.elements.setupApiKey.placeholder, "Saved value retained unless replaced");
 });
 
-test("TLS, host, and API credential edits refresh the re-entry marker", () => {
+test("TLS, host, platform, and API credential edits refresh the re-entry marker", () => {
   const bind = functionSource("bindEvents");
   for (const field of ["setupVerifySsl", "setupTlsCaBundlePath", "setupTlsServerName", "setupTruenasHost"]) {
     const start = bind.indexOf(`elements.${field}?.addEventListener(`);
@@ -442,6 +443,13 @@ test("TLS, host, and API credential edits refresh the re-entry marker", () => {
     const end = bind.indexOf("\n    });", start);
     assert.match(bind.slice(start, end), /syncApiSecretReentry\(\)/, `${field} listener must refresh the re-entry marker`);
   }
+  // Platform is part of the server's credential authority (Codex review on #965).
+  const platformListeners = bind.split('elements.setupPlatform?.addEventListener("change"').slice(1)
+    .map((rest) => rest.slice(0, rest.indexOf("\n    });")));
+  assert.ok(
+    platformListeners.some((body) => /syncApiSecretReentry\(\)/.test(body)),
+    "a platform change must refresh the re-entry marker"
+  );
   assert.match(
     bind,
     /\[elements\.setupApiKey, elements\.setupApiPassword, elements\.setupApiUser\]\.forEach\(\(field\) => \{\s*field\?\.addEventListener\("input", \(\) => \{\s*syncApiSecretReentry\(\);/,

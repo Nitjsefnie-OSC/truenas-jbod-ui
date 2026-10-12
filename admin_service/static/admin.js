@@ -8498,6 +8498,10 @@
         syncApiSecretReentry();
       });
     });
+    // The platform is part of the API credential authority too.
+    elements.setupPlatform?.addEventListener("change", () => {
+      syncApiSecretReentry();
+    });
     elements.setupTlsServerNameSuggestions?.addEventListener("click", (event) => {
       const button = event.target instanceof Element ? event.target.closest("[data-tls-server-name]") : null;
       if (!button || !elements.setupTlsServerName) {

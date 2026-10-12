@@ -473,6 +473,18 @@ class SavedTLSBundleStatusRouteTests(unittest.TestCase):
         self.assertFalse(payload["validation"]["validated"])
         self.assertIn("could not be found", payload["validation"]["detail"])
 
+    def test_a_validation_error_is_reported_without_echoing_exception_text(self) -> None:
+        with patch.object(
+            TLSTrustStoreService,
+            "validate_bundle_for_host",
+            side_effect=ValueError("synthetic internal detail /synthetic/private/path"),
+        ):
+            payload = self._call(self._settings())
+
+        self.assertFalse(payload["validation"]["validated"])
+        self.assertNotIn("synthetic internal detail", payload["validation"]["detail"])
+        self.assertIn("could not be checked", payload["validation"]["detail"])
+
     def test_unknown_system_is_a_404(self) -> None:
         from fastapi import HTTPException
 

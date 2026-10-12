@@ -811,12 +811,20 @@ def build_router(admin_settings: Any) -> APIRouter:
                 timeout_seconds=min(int(truenas.timeout_seconds or 10), 10),
                 tls_server_name=truenas.tls_server_name,
             )
-        except ValueError as exc:
+        except ValueError:
+            # Fixed wording only: the exception text is not echoed (CodeQL
+            # py/stack-trace-exposure). The service raises ValueError for a
+            # missing bundle or a non-HTTPS target.
+            bundle_present = await asyncio.to_thread(Path(bundle_path).is_file)
             validation = {
                 "validated": False,
                 "host": truenas.host,
                 "bundle_path": bundle_path,
-                "detail": str(exc),
+                "detail": (
+                    "The saved bundle could not be checked: the bundle file could not be found."
+                    if not bundle_present
+                    else "The saved bundle could not be checked against this host."
+                ),
             }
         return JSONResponse({"ok": True, "system_id": system.id, "validation": validation})
 
