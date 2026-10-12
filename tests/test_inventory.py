@@ -24007,6 +24007,22 @@ class InventoryDefaultRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Turn on SSH", warning_text)
         self.assertEqual(snapshot.summary.enclosure_source, "ssh")
 
+    async def test_core_ssh_only_bays_name_ssh_as_their_position_source(self) -> None:
+        """With no disk records, SES device names still place the bays over SSH (#950)."""
+        from tests import core_ses_fixtures as fx
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._core_ssh_only_service(temp_dir, {"sudo -n /usr/sbin/sesutil map": fx.SSG_SESUTIL_MAP})
+            snapshot = await service.get_snapshot(force_refresh=True)
+
+        placed = [slot for slot in snapshot.slots if slot.device_name]
+        self.assertEqual(len(placed), 6)
+        self.assertEqual({slot.mapping_source for slot in placed}, {"device-name"})
+        self.assertEqual(
+            {slot.mapping_source for slot in snapshot.slots if not slot.present},
+            {"ses-empty"},
+        )
+
     async def test_core_without_ssh_bays_keeps_the_no_drive_bays_warning(self) -> None:
         no_bays = (
             "TrueNAS did not report any drive bays for this system. Disks and pools are shown without "
@@ -24044,6 +24060,8 @@ class InventoryDefaultRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(core._enclosure_source(raw(), options("ses-a", "ses-b")), "ssh")
         self.assertEqual(core._enclosure_source(raw(), options("ses-a+ses-b")), "ssh")
         self.assertEqual(core._enclosure_source(raw("enc-a"), options("enc-a", "ses-b")), "truenas_and_ssh")
+        # Two API parts stacked into one shelf over SSH: the shelf is SSH's.
+        self.assertEqual(core._enclosure_source(raw("enc-a", "enc-b"), options("enc-a+enc-b")), "truenas_and_ssh")
         # Nothing found: TrueNAS reported none and SSH added none.
         self.assertEqual(core._enclosure_source(raw(), []), "truenas")
         # A flat list of every disk is not an enclosure found over SSH.

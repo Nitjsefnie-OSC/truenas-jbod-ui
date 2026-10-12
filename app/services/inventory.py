@@ -12718,12 +12718,13 @@ class InventoryService:
             for enclosure_id in (normalize_text(str(item.get("id") or "")) for item in raw_data.enclosures)
             if enclosure_id
         }
-        # An option the API did not report, such as an SES enclosure or a
-        # shelf stacked from several, was found over SSH. A flat list of every
-        # disk (a virtual option) is not an enclosure at all.
+        # An option the API did not report as such was found over SSH: an SES
+        # enclosure, or a shelf SSH stacked from several parts even when the
+        # API listed each part. A drawer view counts as its shelf. A flat list
+        # of every disk (a virtual option) is not an enclosure at all.
         found_over_ssh = any(
             option.kind == "physical"
-            and not all(part in api_ids for part in option.id.split("+") if part)
+            and resolve_physical_mapping_scope(option.id) not in api_ids
             for option in available_enclosures
         )
         if not found_over_ssh:
@@ -14331,6 +14332,17 @@ class InventoryService:
         )
         if not disk and self._is_placeholder_hint_device(device_name):
             device_name = None
+        ses_device_names_source = normalize_text(raw_slot_status.get("device_names_source"))
+        if (
+            not disk
+            and resolution_source in {None, "unknown"}
+            and device_name
+            and ses_device_names_source
+            and device_name in {normalize_device_name(item) for item in device_names}
+        ):
+            # No disk record matched (CORE over SSH without the API), but SES
+            # named the device in this bay, so the position came from SSH (#950).
+            resolution_source = "enclosure-sysfs" if ses_device_names_source == "enclosure_sysfs" else "device-name"
         gptid = ssh_data.glabel.device_to_gptid.get(device_name.lower()) if device_name else None
         zpool = self._lookup_zpool_member(disk, device_name, gptid, ssh_data, api_topology_members)
         for peer in () if zpool else bay_peer_devices:
