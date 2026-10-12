@@ -24042,3 +24042,364 @@ class InventoryDefaultRegressionTests(unittest.IsolatedAsyncioTestCase):
         ordered = service._ordered_storage_view_candidates(storage_view, candidates, set())
 
         self.assertEqual([candidate["candidate_id"] for candidate in ordered], ["disk-1", "disk-0"])
+
+
+def _issue_949_flash_pool(status: str, member_states: tuple[str, ...]) -> dict:
+    """A synthetic `pool.query` row: one mirror of NVMe members (#949)."""
+    return {
+        "name": "flashpool",
+        "status": status,
+        "healthy": status == "ONLINE",
+        "topology": {
+            "data": [
+                {
+                    "type": "MIRROR",
+                    "name": "mirror-0",
+                    "status": status,
+                    "children": [
+                        {
+                            "type": "DISK",
+                            "path": f"/dev/nvd{index}p2",
+                            "device": f"nvd{index}p2",
+                            "disk": f"nvd{index}",
+                            "guid": f"4444000000000000000{index}",
+                            "status": state,
+                            "children": [],
+                        }
+                        for index, state in enumerate(member_states)
+                    ],
+                }
+            ],
+            "cache": [],
+            "log": [],
+            "spare": [],
+            "special": [],
+            "dedup": [],
+        },
+    }
+
+
+ISSUE_949_ZPOOL_STATUS_LP_DEGRADED = """
+  pool: flashpool
+ state: DEGRADED
+status: One or more devices has experienced an unrecoverable error.
+config:
+
+\tNAME             STATE     READ WRITE CKSUM
+\tflashpool        DEGRADED     0     0     0
+\t  mirror-0       DEGRADED     0     0     0
+\t    /dev/nvd0p2  DEGRADED   206     0   141  too many errors
+\t    /dev/nvd1p2  ONLINE       0     0     0
+
+errors: No known data errors
+
+  pool: boot-pool
+ state: ONLINE
+config:
+
+\tNAME             STATE     READ WRITE CKSUM
+\tboot-pool        ONLINE       0     0     0
+\t  /dev/ada0p2    ONLINE       0     0     0
+
+errors: No known data errors
+""".strip("\n")
+
+ISSUE_949_ZPOOL_STATUS_GP_DEGRADED = """
+  pool: flashpool
+ state: DEGRADED
+config:
+
+\tNAME                        STATE     READ WRITE CKSUM
+\tflashpool                   DEGRADED     0     0     0
+\t  44440000000000000009      DEGRADED     0     0     0
+\t    44440000000000000000    DEGRADED   206     0   141  too many errors
+\t    44440000000000000001    ONLINE       0     0     0
+
+errors: No known data errors
+
+  pool: boot-pool
+ state: ONLINE
+config:
+
+\tNAME                        STATE     READ WRITE CKSUM
+\tboot-pool                   ONLINE       0     0     0
+\t  44440000000000000002      ONLINE       0     0     0
+
+errors: No known data errors
+""".strip("\n")
+
+
+class StorageViewPoolHealthTests(unittest.IsolatedAsyncioTestCase):
+    """Storage-view disks and the warning list report pool health (#949)."""
+
+    @staticmethod
+    def _nvme_record(index: int, health: str | None = None) -> DiskRecord:
+        return DiskRecord(
+            raw={"transport_address": f"0000:6{index}:00.0"},
+            device_name=f"nvd{index}",
+            path_device_name=f"nvd{index}",
+            multipath_name=None,
+            multipath_member=None,
+            serial=f"SER-NVME-{index}",
+            model="Synthetic NVMe",
+            size_bytes=2_000_000_000_000,
+            identifier=None,
+            health=health,
+            pool_name="flashpool",
+            lunid=None,
+            bus="NVME",
+            temperature_c=None,
+            last_smart_test_type=None,
+            last_smart_test_status=None,
+            last_smart_test_lifetime_hours=None,
+            logical_block_size=None,
+            physical_block_size=None,
+            enclosure_id=None,
+            slot=None,
+            smart_devices=[f"nvd{index}"],
+            lookup_keys={f"nvd{index}", f"ser-nvme-{index}"},
+        )
+
+    def _nvme_view_service(
+        self,
+        temp_dir: str,
+        *,
+        pools: list[dict],
+        ssh_outputs: dict[str, str] | None = None,
+        disk_health: str | None = None,
+    ) -> InventoryService:
+        system = SystemConfig(
+            id="core-synthetic",
+            label="Synthetic CORE",
+            storage_views=[
+                {
+                    "id": "nvme-carrier",
+                    "label": "NVMe Carrier",
+                    "kind": "nvme_carrier",
+                    "template_id": "nvme-carrier-4",
+                    "enabled": True,
+                    "order": 20,
+                    "render": {"show_in_main_ui": True, "show_in_admin_ui": True, "default_collapsed": False},
+                    "binding": {
+                        "mode": "serial",
+                        "enclosure_ids": [],
+                        "pool_names": [],
+                        "serials": [],
+                        "pcie_addresses": [],
+                        "device_names": ["nvd0", "nvd1"],
+                    },
+                }
+            ],
+            truenas=TrueNASConfig(host="https://core.example.test", api_key="token", platform="core"),
+        )
+        service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
+        service.get_snapshot = AsyncMock(
+            return_value=InventorySnapshot(
+                slots=[],
+                refresh_interval_seconds=30,
+                selected_system_id="core-synthetic",
+                selected_system_label="Synthetic CORE",
+            )
+        )
+        service._get_inventory_source_bundle = AsyncMock(
+            return_value=InventorySourceBundle(
+                raw_data=TrueNASRawData(
+                    enclosures=[], disks=[], pools=pools, disk_temperatures={}, smart_test_results=[],
+                ),
+                ssh_outputs=ssh_outputs or {},
+                ssh_collected=bool(ssh_outputs),
+                warnings=[],
+                sources={},
+                scale_ses_data=ParsedSSHData(),
+                quantastor_ses_data=ParsedSSHData(),
+            )
+        )
+        service._build_storage_view_candidate_records = MagicMock(
+            return_value=[self._nvme_record(index, disk_health) for index in (0, 1)]
+        )
+        return service
+
+    @staticmethod
+    def _slots_by_device(runtime) -> tuple[object, dict[str, StorageViewRuntimeSlot]]:
+        view = next(view for view in runtime.views if view.id == "nvme-carrier")
+        return view, {slot.device_name: slot for slot in view.slots if slot.device_name}
+
+    async def test_degraded_or_faulted_pool_member_draws_the_storage_view_disk_as_fault(self) -> None:
+        for member_state in ("DEGRADED", "FAULTED"):
+            with self.subTest(member_state=member_state), tempfile.TemporaryDirectory() as temp_dir:
+                service = self._nvme_view_service(
+                    temp_dir, pools=[_issue_949_flash_pool("DEGRADED", (member_state, "ONLINE"))],
+                )
+                runtime = await service.get_storage_view_runtime()
+                view, slots = self._slots_by_device(runtime)
+
+                self.assertEqual(slots["nvd0"].state, "fault")
+                self.assertEqual(slots["nvd0"].health, member_state)
+                self.assertEqual(slots["nvd0"].vdev_name, "mirror-0")
+                self.assertEqual(
+                    service._build_slot_view_from_storage_view_runtime_slot(view, slots["nvd0"]).state,
+                    SlotState.fault,
+                )
+                # The healthy mirror member stays healthy.
+                self.assertEqual(slots["nvd1"].state, "matched")
+                self.assertEqual(slots["nvd1"].health, "ONLINE")
+                self.assertEqual(
+                    service._build_slot_view_from_storage_view_runtime_slot(view, slots["nvd1"]).state,
+                    SlotState.healthy,
+                )
+
+    async def test_online_pool_member_keeps_the_storage_view_disk_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._nvme_view_service(temp_dir, pools=[_issue_949_flash_pool("ONLINE", ("ONLINE", "ONLINE"))])
+            runtime = await service.get_storage_view_runtime()
+        view, slots = self._slots_by_device(runtime)
+
+        for device in ("nvd0", "nvd1"):
+            with self.subTest(device=device):
+                self.assertEqual(slots[device].state, "matched")
+                self.assertEqual(slots[device].vdev_name, "mirror-0")
+                self.assertEqual(
+                    service._build_slot_view_from_storage_view_runtime_slot(view, slots[device]).state,
+                    SlotState.healthy,
+                )
+        empty = next(slot for slot in view.slots if not slot.occupied)
+        self.assertEqual(empty.state, "empty")
+        self.assertEqual(
+            service._build_slot_view_from_storage_view_runtime_slot(view, empty).state,
+            SlotState.empty,
+        )
+
+    def test_candidate_without_a_pool_field_takes_the_pool_from_its_member(self) -> None:
+        # A pool-bound view matches on the candidate's pool name; a disk row
+        # without a pool still belongs to the pool its member names.
+        from dataclasses import replace
+
+        from app.services.parsers import parse_pool_query_topology
+
+        service = InventoryDefaultRegressionTests._bare_service("core")
+        disk = replace(self._nvme_record(0), pool_name=None)
+        member = parse_pool_query_topology([_issue_949_flash_pool("DEGRADED", ("FAULTED", "ONLINE"))])["nvd0"]
+
+        candidate = service._serialize_storage_view_candidate(disk, pool_member=member)
+        self.assertEqual(candidate["pool_name"], "flashpool")
+        self.assertIn("pool flashpool", candidate["description"])
+
+        storage_view = StorageViewConfig.model_validate({
+            "id": "flash",
+            "label": "Flash",
+            "kind": "nvme_carrier",
+            "template_id": "nvme-carrier-4",
+            "binding": {"mode": "pool", "pool_names": ["flashpool"]},
+        })
+        runtime_slot = service._build_candidate_runtime_slot(storage_view, 0, "M2-1", 1, candidate)
+        self.assertEqual(runtime_slot.pool_name, "flashpool")
+        self.assertEqual(runtime_slot.state, "fault")
+        self.assertTrue(service._candidate_matches_storage_view(storage_view, candidate))
+
+    async def test_bad_disk_health_without_a_pool_member_is_fault(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._nvme_view_service(temp_dir, pools=[], disk_health="FAULTED")
+            runtime = await service.get_storage_view_runtime()
+        _view, slots = self._slots_by_device(runtime)
+
+        self.assertEqual(slots["nvd0"].state, "fault")
+        self.assertEqual(slots["nvd0"].health, "FAULTED")
+
+    async def test_ssh_only_pool_member_state_reaches_the_storage_view_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._nvme_view_service(
+                temp_dir,
+                pools=[],
+                ssh_outputs={
+                    "/usr/local/sbin/zpool status -gP": ISSUE_949_ZPOOL_STATUS_GP_DEGRADED,
+                    "/usr/local/sbin/zpool status -LP": ISSUE_949_ZPOOL_STATUS_LP_DEGRADED,
+                },
+            )
+            runtime = await service.get_storage_view_runtime()
+        _view, slots = self._slots_by_device(runtime)
+
+        self.assertEqual(slots["nvd0"].state, "fault")
+        self.assertEqual(slots["nvd0"].health, "DEGRADED")
+        self.assertEqual(slots["nvd0"].vdev_name, "mirror-0")
+        self.assertEqual(slots["nvd1"].state, "matched")
+        self.assertEqual(slots["nvd1"].health, "ONLINE")
+
+    async def test_degraded_pool_is_a_page_warning_from_the_api(self) -> None:
+        raw_data = InventoryDefaultRegressionTests._core_api_raw_data(12)
+        raw_data.pools = [_issue_949_flash_pool("DEGRADED", ("DEGRADED", "FAULTED"))]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = InventoryDefaultRegressionTests._core_service(self, temp_dir, raw_data)
+            snapshot = await service.get_snapshot(force_refresh=True)
+
+        self.assertEqual(
+            [warning for warning in snapshot.warnings if warning.startswith("Pool ")],
+            ["Pool flashpool is DEGRADED."],
+        )
+
+    async def test_degraded_pool_is_a_page_warning_with_ssh_only(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        outputs = {
+            "sudo -n /usr/sbin/sesutil map": fx.SSG_SESUTIL_MAP,
+            "/usr/local/sbin/zpool status -gP": ISSUE_949_ZPOOL_STATUS_GP_DEGRADED,
+            "/usr/local/sbin/zpool status -LP": ISSUE_949_ZPOOL_STATUS_LP_DEGRADED,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = InventoryDefaultRegressionTests._core_ssh_only_service(temp_dir, outputs)
+            snapshot = await service.get_snapshot(force_refresh=True)
+
+        self.assertEqual(
+            [warning for warning in snapshot.warnings if warning.startswith("Pool ")],
+            ["Pool flashpool is DEGRADED."],
+        )
+
+    async def test_online_pools_raise_no_pool_warning(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        raw_data = InventoryDefaultRegressionTests._core_api_raw_data(12)
+        raw_data.pools = [_issue_949_flash_pool("ONLINE", ("ONLINE", "ONLINE"))]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_service = InventoryDefaultRegressionTests._core_service(self, temp_dir, raw_data)
+            api_snapshot = await api_service.get_snapshot(force_refresh=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ssh_service = InventoryDefaultRegressionTests._core_ssh_only_service(
+                temp_dir,
+                {
+                    "sudo -n /usr/sbin/sesutil map": fx.SSG_SESUTIL_MAP,
+                    "/usr/local/sbin/zpool status -gP": fx.ZPOOL_STATUS_GP,
+                    "/usr/local/sbin/zpool status -LP": fx.ZPOOL_STATUS_LP,
+                },
+            )
+            ssh_snapshot = await ssh_service.get_snapshot(force_refresh=True)
+
+        for snapshot in (api_snapshot, ssh_snapshot):
+            self.assertFalse([warning for warning in snapshot.warnings if warning.startswith("Pool ")])
+
+    def test_pool_warning_needs_a_known_pool_state(self) -> None:
+        core = InventoryDefaultRegressionTests._bare_service("core")
+        empty_raw = TrueNASRawData(enclosures=[], disks=[], pools=[], disk_temperatures={}, smart_test_results=[])
+
+        # No status in the API row and no zpool output: the state is unknown.
+        unknown = TrueNASRawData(
+            enclosures=[], disks=[], pools=[{"name": "flashpool", "topology": {}}],
+            disk_temperatures={}, smart_test_results=[],
+        )
+        self.assertEqual(core._pool_state_warnings(unknown, ParsedSSHData()), [])
+        self.assertEqual(core._pool_state_warnings(empty_raw, ParsedSSHData()), [])
+
+        # The API answers for a pool it reports; SSH fills in pools the API
+        # leaves out, such as the boot pool.
+        api_online = TrueNASRawData(
+            enclosures=[], disks=[], pools=[{"name": "flashpool", "status": "ONLINE"}],
+            disk_temperatures={}, smart_test_results=[],
+        )
+        ssh_states = ParsedSSHData(zpool_pool_states={"flashpool": "DEGRADED", "boot-pool": "DEGRADED"})
+        self.assertEqual(core._pool_state_warnings(api_online, ssh_states), ["Pool boot-pool is DEGRADED."])
+
+        # QuantaStor pool rows are a different shape and are not read here.
+        quantastor = InventoryDefaultRegressionTests._bare_service("quantastor")
+        quantastor_pools = TrueNASRawData(
+            enclosures=[], disks=[], pools=[{"name": "qs-pool", "status": "DEGRADED"}],
+            disk_temperatures={}, smart_test_results=[],
+        )
+        self.assertEqual(quantastor._pool_state_warnings(quantastor_pools, ParsedSSHData()), [])
