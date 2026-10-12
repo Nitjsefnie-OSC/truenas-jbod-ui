@@ -1578,6 +1578,7 @@ class InventoryService:
                                     discovery_candidate,
                                     source_publications,
                                     required_source_publication,
+                                    explicit_selection=False,
                                 ))
                     if (self._snapshot_has_trusted_topology(discovered_snapshot)
                             and discovery_publication_is_current()):
@@ -1716,6 +1717,7 @@ class InventoryService:
                 snapshot,
                 source_publications,
                 required_source_publication,
+                explicit_selection=selected_enclosure_id is not None,
             ):
                 current = self._current_snapshot_for_superseded_refresh(
                     publication_key,
@@ -1754,6 +1756,7 @@ class InventoryService:
                                     candidate,
                                     source_publications,
                                     required_source_publication,
+                                    explicit_selection=selected_enclosure_id is not None,
                                 ))
                     if publication_is_current():
                         # Observe only an eligible view while holding its actual
@@ -1770,6 +1773,7 @@ class InventoryService:
                         source_publication=self._built_source_publication(source_publications),
                         minimum_source_publication=required_source_publication,
                         build_source_publications=source_publications,
+                        explicit_selection=selected_enclosure_id is not None,
                     )
                     if published:
                         self._replace_canonical_options_from_trusted_snapshot(
@@ -1854,22 +1858,31 @@ class InventoryService:
         snapshot: InventorySnapshot | None,
         build_source_publications: list[SourcePublication],
         minimum_source_publication: SourcePublication | None,
+        *,
+        explicit_selection: bool,
     ) -> bool:
         """May this build publish although a newer request set the canonical options?
 
-        A build whose own sources are no older than the ones behind the
-        current canonical options, and that saw the same enclosures, carries
-        the same or newer bay and disk identity; only its request number is
-        older. A forced refresh overtaken by the other enclosure's publication
-        is then published instead of answering busy. Without a recorded source
-        for either side, a different enclosure set, or sources older than the
-        request needs, it stays superseded and fails closed. Topology changes
-        and invalidated keys are checked separately by the callers.
+        A build for an explicitly selected enclosure whose own sources are no
+        older than the ones behind the current canonical options, and that saw
+        the same enclosures, carries the same or newer bay and disk identity;
+        only its request number is older. A forced refresh overtaken by the
+        other enclosure's publication is then published instead of answering
+        busy. A build without a selection also decides the default enclosure,
+        which the older request may no longer change, so it stays superseded.
+        So does a build without a recorded source for either side, with a
+        different enclosure set, or with sources older than the request needs.
+        Topology changes and invalidated keys are checked by the callers.
         """
         if request_sequence >= self._canonical_options_request_sequence:
             return True
         canonical_sources = self._canonical_options_source_publication
-        if snapshot is None or canonical_sources is None or not build_source_publications:
+        if (
+            not explicit_selection
+            or snapshot is None
+            or canonical_sources is None
+            or not build_source_publications
+        ):
             return False
         built = build_source_publications[-1]
         return (
@@ -1921,6 +1934,7 @@ class InventoryService:
         source_publication: SourcePublication,
         minimum_source_publication: SourcePublication | None,
         build_source_publications: list[SourcePublication] | None = None,
+        explicit_selection: bool = False,
     ) -> tuple[InventorySnapshot, bool]:
         if self._snapshot_published_sequence.get(cache_key, -1) > request_sequence:
             current = self._cache.get(cache_key)
@@ -1936,6 +1950,7 @@ class InventoryService:
             snapshot,
             build_source_publications or [],
             minimum_source_publication,
+            explicit_selection=explicit_selection,
         ):
             # Another request published trusted topology after this build began.
             # Reuse a still-valid public value without publishing this candidate;

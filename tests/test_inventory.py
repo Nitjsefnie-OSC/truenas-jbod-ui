@@ -16970,6 +16970,25 @@ class InventoryServiceMutationRefreshTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(a_builds, 1)
                 self.assertIs(service._cache["enc-a"], public_a)
 
+    async def test_superseded_default_selection_refresh_still_fails_closed(self) -> None:
+        # A build without an explicit enclosure decides the default. If an
+        # older one published, the newer canonical options would keep the old
+        # default, so only explicit selections are let through.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, public_a = self._superseded_service(temp_dir, public_a_expired=True)
+            fresh = inventory_module.SourcePublication(sequence=1, sg_cache_generation=1)
+            result, a_builds = await self._race_a_against_b(
+                service,
+                public_a,
+                lambda: service.get_snapshot(force_refresh=True),
+                a_sources=fresh,
+                b_sources=fresh,
+            )
+            self.assertIsInstance(result, inventory_module.SnapshotStateBusyError)
+            self.assertEqual(a_builds, 1)
+            self.assertIs(service._cache["enc-a"], public_a)
+            self.assertEqual(service._canonical_default_enclosure_id, "enc-a")
+
     async def test_superseded_ordinary_refresh_does_not_return_an_expired_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service, public_a = self._superseded_service(temp_dir, public_a_expired=True)
