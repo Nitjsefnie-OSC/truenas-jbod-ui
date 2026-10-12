@@ -279,8 +279,22 @@ not run `visudo -cf` first. Confirm the installed sudo version before using
 regex entries. On an older host, enumerate the exact SMART device commands
 instead of replacing the regex with a wildcard.
 
+The middleware puts a backslash before every `,`, `:`, `=` and `\` when it
+writes these entries to sudoers. Inside a regex that breaks an interval such as
+`{0,2}` (#943), so the CORE SMART entries use two optional path groups and no
+`:`. Keep entries free of those characters inside a regex. After applying,
+check each app command as the service user, for example
+`sudo -n -l /usr/local/sbin/smartctl -x -j /dev/da0`.
+
+The admin bootstrap does not create the CORE account. Create it first in the
+CORE web UI under Accounts > Users with a home directory under `/mnt`, shell
+`sh`, Disable Password on and the app's SSH public key pasted in. Bootstrap then
+looks the account up through the middleware, installs the key and applies this
+list. If the account is missing or its home directory is not under `/mnt`,
+bootstrap stops before changing anything.
+
 ```bash
-midclt call user.update USER_ID '{"sudo":true,"sudo_nopasswd":true,"sudo_commands":["/usr/sbin/sesutil map","/usr/sbin/sesutil show","/sbin/camcontrol devlist -v","/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ on$","/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ off$","/usr/local/sbin/smartctl ^-x -j /dev/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*(/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*){0,2}$","/usr/local/sbin/smartctl ^-x /dev/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*(/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*){0,2}$","/usr/sbin/mprutil show adapter","/usr/sbin/mprutil show adapters","/usr/sbin/mprutil show all","/usr/sbin/mprutil show devices","/usr/sbin/mprutil show enclosures","/usr/sbin/mprutil show expanders","/usr/sbin/mprutil show iocfacts","/usr/sbin/mprutil ^-u [0-9]+ show adapter$","/usr/sbin/mprutil ^-u [0-9]+ show all$","/usr/sbin/mprutil ^-u [0-9]+ show devices$","/usr/sbin/mprutil ^-u [0-9]+ show enclosures$","/usr/sbin/mprutil ^-u [0-9]+ show expanders$","/usr/sbin/mprutil ^-u [0-9]+ show iocfacts$","/usr/local/sbin/dmidecode -t slot","/usr/bin/tail -n 4000 /var/log/messages","/usr/local/bin/midclt call disk.multipath_sync","/usr/local/bin/midclt call disk.sync_all","/usr/local/bin/midclt ^call core\\.get_jobs \\[\\[\\\"id\\\"\\,\\\"=\\\"\\,[0-9]+\\]\\]$"]}'
+midclt call user.update USER_ID '{"sudo":true,"sudo_nopasswd":true,"sudo_commands":["/usr/sbin/sesutil map","/usr/sbin/sesutil show","/sbin/camcontrol devlist -v","/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ on$","/usr/sbin/sesutil ^locate -u /dev/ses[0-9]+ [0-9]+ off$","/usr/local/sbin/smartctl ^-x -j /dev/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?$","/usr/local/sbin/smartctl ^-x /dev/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?$","/usr/sbin/mprutil show adapter","/usr/sbin/mprutil show adapters","/usr/sbin/mprutil show all","/usr/sbin/mprutil show devices","/usr/sbin/mprutil show enclosures","/usr/sbin/mprutil show expanders","/usr/sbin/mprutil show iocfacts","/usr/sbin/mprutil ^-u [0-9]+ show adapter$","/usr/sbin/mprutil ^-u [0-9]+ show all$","/usr/sbin/mprutil ^-u [0-9]+ show devices$","/usr/sbin/mprutil ^-u [0-9]+ show enclosures$","/usr/sbin/mprutil ^-u [0-9]+ show expanders$","/usr/sbin/mprutil ^-u [0-9]+ show iocfacts$","/usr/local/sbin/dmidecode -t slot","/usr/bin/tail -n 4000 /var/log/messages","/usr/local/bin/midclt call disk.multipath_sync","/usr/local/bin/midclt call disk.sync_all","/usr/local/bin/midclt ^call core\\.get_jobs \\[\\[\\\"id\\\"\\,\\\"=\\\"\\,[0-9]+\\]\\]$"]}'
 ```
 
 That enables:

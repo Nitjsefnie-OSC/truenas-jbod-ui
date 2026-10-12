@@ -18,6 +18,15 @@ PUBLIC_KEY_PREFIXES = ("ssh-ed25519 ", "ssh-rsa ", "ecdsa-", "sk-ssh-")
 SUDOERS_DIR_CANDIDATES = ("/usr/local/etc/sudoers.d", "/etc/sudoers.d")
 SAVED_SUDO_COMMAND_PREFIX = re.compile(r"^sudo\b", re.IGNORECASE)
 SAVED_SSH_COMMANDS_UNAVAILABLE_DETAIL = "The saved SSH command list is unavailable."
+BOOTSTRAP_SUDO_PASSWORD_UNSUPPORTED_DETAIL = (
+    "Bootstrap sends its setup script to the host as command input, so it cannot also "
+    "send a sudo password. Log in as root, or as a user with passwordless sudo, and "
+    "leave the sudo password blank."
+)
+CORE_SERVICE_HOME_HELP = (
+    "with a home directory under /mnt, shell sh, Disable Password on and this app's "
+    "SSH public key pasted in"
+)
 ESXI_BOOTSTRAP_UNSUPPORTED_DETAIL = (
     "VMware ESXi does not use the Linux one-time bootstrap or sudoers flow. "
     "Save the SSH host, root or key-based auth, and the read-only runtime commands directly instead."
@@ -69,6 +78,21 @@ SMARTCTL_SUDO_COMMANDS = (
     r"/usr/local/sbin/smartctl ^-d [A-Za-z0-9][A-Za-z0-9_:+./-]*(\,[A-Za-z0-9][A-Za-z0-9_:+./-]*)* -x -j /dev/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*(/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*){0,2}$",
     r"/usr/local/sbin/smartctl ^-d [A-Za-z0-9][A-Za-z0-9_:+./-]*(\,[A-Za-z0-9][A-Za-z0-9_:+./-]*)* -x /dev/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*(/[A-Za-z0-9_:+-][A-Za-z0-9_.:+-]*){0,2}$",
 )
+# TrueNAS CORE stores grants through the middleware, whose sudoers template
+# escapes `\`, `,`, `:` and `=` with a backslash. Inside a regex that turns the
+# interval `{0,2}` into `{0\,2}`, which matches nothing (#943). These forms use
+# two optional path groups instead and keep `:` out of the bracket expressions.
+# CORE installs smartctl only under /usr/local/sbin, the middleware refuses a
+# grant naming a missing executable, and CORE disks never carry a `-d` type.
+CORE_SMARTCTL_DEVICE_PATTERN = (
+    "/dev/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*"
+    "(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?"
+    "(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)?"
+)
+CORE_SMARTCTL_SUDO_COMMANDS = (
+    f"/usr/local/sbin/smartctl ^-x -j {CORE_SMARTCTL_DEVICE_PATTERN}$",
+    f"/usr/local/sbin/smartctl ^-x {CORE_SMARTCTL_DEVICE_PATTERN}$",
+)
 LINUX_NVME_SUDO_COMMANDS = (
     "/usr/sbin/nvme ^smart-log -o json /dev/nvme[0-9]+$",
     "/usr/sbin/nvme ^id-ctrl -o json /dev/nvme[0-9]+$",
@@ -103,7 +127,7 @@ SUDO_COMMANDS_BY_PLATFORM: dict[str, tuple[str, ...]] = {
         "/usr/sbin/sesutil show",
         *CORE_SESUTIL_LOCATE_SUDO_COMMANDS,
         "/sbin/camcontrol devlist -v",
-        *SMARTCTL_SUDO_COMMANDS,
+        *CORE_SMARTCTL_SUDO_COMMANDS,
         *CORE_MPRUTIL_SUDO_COMMANDS,
         *CORE_DMIDECODE_SUDO_COMMANDS,
         *CORE_MESSAGES_SUDO_COMMANDS,
@@ -129,7 +153,7 @@ SUDO_COMMANDS_BY_PLATFORM: dict[str, tuple[str, ...]] = {
 SUPPLEMENTAL_SUDO_COMMANDS_BY_PLATFORM: dict[str, tuple[str, ...]] = {
     "core": (
         *CORE_SESUTIL_LOCATE_SUDO_COMMANDS,
-        *SMARTCTL_SUDO_COMMANDS,
+        *CORE_SMARTCTL_SUDO_COMMANDS,
         *CORE_MPRUTIL_SUDO_COMMANDS,
         *CORE_DMIDECODE_SUDO_COMMANDS,
         *CORE_MESSAGES_SUDO_COMMANDS,
@@ -198,6 +222,10 @@ class ServiceAccountBootstrapService:
     def bootstrap_service_account(self, payload: SystemSetupBootstrapRequest) -> dict[str, object]:
         if payload.platform == "esxi":
             raise ValueError(ESXI_BOOTSTRAP_UNSUPPORTED_DETAIL)
+        requires_sudo = self._requires_sudo(payload.bootstrap_user)
+        if requires_sudo and payload.bootstrap_sudo_password:
+            # The script travels on stdin, which a piped sudo password would share.
+            raise ValueError(BOOTSTRAP_SUDO_PASSWORD_UNSUPPORTED_DETAIL)
         public_key, key_source = self._resolve_public_key(payload)
         ssh_config = SSHConfig(
             enabled=True,
@@ -206,15 +234,16 @@ class ServiceAccountBootstrapService:
             user=payload.bootstrap_user,
             key_path=payload.bootstrap_key_path or "",
             password=payload.bootstrap_password or "",
-            sudo_password=payload.bootstrap_sudo_password or "",
+            sudo_password="",
             known_hosts_path=self.known_hosts_path,
             strict_host_key_checking=payload.bootstrap_strict_host_key_checking,
             timeout_seconds=payload.timeout_seconds,
             commands=[],
         )
         probe = self.probe_factory(ssh_config)
-        command = self._build_bootstrap_command(payload, public_key)
-        result = probe.run_command_sync(command)
+        command = self._build_bootstrap_command(payload)
+        script = self._build_remote_script(payload, public_key) + "\n"
+        result = probe.run_command_sync(command, stdin_data=script)
         if not result.ok:
             detail = result.stderr.strip() or result.stdout.strip() or "Unknown SSH bootstrap error."
             raise ValueError(detail)
@@ -287,12 +316,13 @@ class ServiceAccountBootstrapService:
                 continue
         raise ValueError("The selected SSH key path does not contain a supported private key.")
 
-    def _build_bootstrap_command(self, payload: SystemSetupBootstrapRequest, public_key: str) -> str:
-        script = self._build_remote_script(payload, public_key)
-        wrapped_script = shlex.join(["/bin/sh", "-lc", script])
+    def _build_bootstrap_command(self, payload: SystemSetupBootstrapRequest) -> str:
+        # sshd hands this string to the login user's shell, which is csh for root
+        # on TrueNAS CORE. Keep it one line with no quoting; the script itself
+        # goes on stdin. FreeBSD's /bin/sh has no -l option (#947).
         if self._requires_sudo(payload.bootstrap_user):
-            return shlex.join(["sudo", "-n", "/bin/sh", "-lc", script])
-        return wrapped_script
+            return "sudo -n /bin/sh -s"
+        return "/bin/sh -s"
 
     @staticmethod
     def _requires_sudo(bootstrap_user: str) -> bool:
@@ -313,26 +343,27 @@ class ServiceAccountBootstrapService:
             if payload.install_sudo_rules and payload.platform != "core"
             else ""
         )
+        if payload.platform == "core":
+            account_lines = self._core_account_lookup_script()
+        else:
+            account_lines = [
+                "if id \"$svc_user\" >/dev/null 2>&1; then",
+                "  :",
+                "elif command -v pw >/dev/null 2>&1; then",
+                "  pw useradd \"$svc_user\" -m -s \"$svc_shell\"",
+                "elif command -v useradd >/dev/null 2>&1; then",
+                "  useradd -m -s \"$svc_shell\" \"$svc_user\"",
+                "else",
+                "  echo \"No supported user-management command was found on the remote host.\" >&2",
+                "  exit 1",
+                "fi",
+                "home_dir=$(awk -F: -v user=\"$svc_user\" '$1 == user { print $6 }' /etc/passwd | head -n1)",
+                "if [ -z \"$home_dir\" ]; then",
+                "  home_dir=\"/home/$svc_user\"",
+                "fi",
+            ]
         script_lines = [
-            "set -eu",
-            f"svc_user={shlex.quote(service_user)}",
-            f"svc_shell={shlex.quote(service_shell)}",
-            f"pubkey={shlex.quote(public_key)}",
-            f"install_sudo={shlex.quote(install_sudo)}",
-            "if id \"$svc_user\" >/dev/null 2>&1; then",
-            "  :",
-            "elif command -v pw >/dev/null 2>&1; then",
-            "  pw useradd \"$svc_user\" -m -s \"$svc_shell\"",
-            "elif command -v useradd >/dev/null 2>&1; then",
-            "  useradd -m -s \"$svc_shell\" \"$svc_user\"",
-            "else",
-            "  echo \"No supported user-management command was found on the remote host.\" >&2",
-            "  exit 1",
-            "fi",
-            "home_dir=$(awk -F: -v user=\"$svc_user\" '$1 == user { print $6 }' /etc/passwd | head -n1)",
-            "if [ -z \"$home_dir\" ]; then",
-            "  home_dir=\"/home/$svc_user\"",
-            "fi",
+            *account_lines,
             "ssh_dir=\"$home_dir/.ssh\"",
             "authorized_keys_path=\"$ssh_dir/authorized_keys\"",
             "mkdir -p \"$ssh_dir\"",
@@ -351,21 +382,7 @@ class ServiceAccountBootstrapService:
         if payload.platform == "core":
             script_lines.extend(
                 [
-                    "  if ! command -v midclt >/dev/null 2>&1; then",
-                    "    echo \"TrueNAS CORE midclt was not found on the remote host.\" >&2",
-                    "    exit 1",
-                    "  fi",
                     f"  midclt_payload={shlex.quote(core_midclt_payload)}",
-                    "  svc_query=$(printf '[[\"username\",\"=\",\"%s\"]]' \"$svc_user\")",
-                    "  svc_user_json=$(midclt call user.query \"$svc_query\")",
-                    (
-                        "  svc_id=$(printf '%s\\n' \"$svc_user_json\" | "
-                        "sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n1)"
-                    ),
-                    "  if [ -z \"$svc_id\" ]; then",
-                    "    echo \"Unable to resolve the TrueNAS CORE middleware user id for $svc_user.\" >&2",
-                    "    exit 1",
-                    "  fi",
                     "  midclt call user.update \"$svc_id\" \"$midclt_payload\" >/dev/null",
                     "  sudoers_path=\"midclt:user.update:$svc_id\"",
                     "  permission_target=\"$sudoers_path\"",
@@ -388,7 +405,70 @@ class ServiceAccountBootstrapService:
             "printf 'BOOTSTRAP_SUDO_RULES_INSTALLED=%s\\n' \"$install_sudo\"",
             ]
         )
-        return "\n".join(script_lines)
+        # `/bin/sh -s` reads this script from stdin. The shell parses the whole
+        # function before running it, and the body's own stdin is /dev/null, so
+        # no command it runs can read the rest of the script as its input.
+        return "\n".join(
+            [
+                "set -eu",
+                f"svc_user={shlex.quote(service_user)}",
+                f"svc_shell={shlex.quote(service_shell)}",
+                f"pubkey={shlex.quote(public_key)}",
+                f"install_sudo={shlex.quote(install_sudo)}",
+                "bootstrap_main() {",
+                *script_lines,
+                "}",
+                "bootstrap_main </dev/null",
+            ]
+        )
+
+    @staticmethod
+    def _core_account_lookup_script() -> list[str]:
+        """Resolve the CORE middleware account before anything on the host changes.
+
+        TrueNAS CORE regenerates /etc/master.passwd from the middleware, so an
+        account made with `pw useradd` disappears and cannot be granted sudo
+        through `user.update` (#947). The operator creates the account in the
+        web UI; bootstrap only installs the key and applies the grants.
+        """
+        nothing_changed = "Nothing was changed on the host."
+        return [
+            "if ! command -v midclt >/dev/null 2>&1; then",
+            f"  echo \"TrueNAS CORE midclt was not found on the remote host. {nothing_changed}\" >&2",
+            "  exit 1",
+            "fi",
+            "svc_query=$(printf '[[\"username\",\"=\",\"%s\"]]' \"$svc_user\")",
+            "svc_user_json=$(midclt call user.query \"$svc_query\" '{\"select\":[\"id\",\"username\",\"home\"]}')",
+            (
+                "svc_id=$(printf '%s\\n' \"$svc_user_json\" | "
+                "sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n1)"
+            ),
+            (
+                "home_dir=$(printf '%s\\n' \"$svc_user_json\" | "
+                "sed -n 's/.*\"home\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' | head -n1)"
+            ),
+            "if [ -z \"$svc_id\" ]; then",
+            (
+                "  echo \"The TrueNAS CORE account $svc_user does not exist. "
+                f"{nothing_changed} Create it in the CORE web UI under Accounts > Users "
+                f"{CORE_SERVICE_HOME_HELP}, then run this setup again.\" >&2"
+            ),
+            "  exit 1",
+            "fi",
+            "pool_root=/mnt",
+            "case \"$home_dir\" in",
+            "  \"$pool_root\"/?*) ;;",
+            "  *)",
+            (
+                "    echo \"The TrueNAS CORE account $svc_user has home directory '$home_dir'. "
+                "CORE keeps SSH keys only for accounts whose home directory is under /mnt. "
+                f"{nothing_changed} In Accounts > Users, edit $svc_user {CORE_SERVICE_HOME_HELP}, "
+                "then run this setup again.\" >&2"
+            ),
+            "    exit 1",
+            "    ;;",
+            "esac",
+        ]
 
 
     @classmethod
@@ -508,7 +588,8 @@ class ServiceAccountBootstrapService:
                 "path_candidates": [],
                 "detail": (
                     "TrueNAS CORE bootstrap runs this same one-line middleware command after resolving "
-                    f"USER_ID for {service_user} on the host."
+                    f"USER_ID for {service_user} on the host. Create {service_user} first in "
+                    f"Accounts > Users {CORE_SERVICE_HOME_HELP}."
                 ),
                 "content": cls._build_core_midclt_user_update_command(
                     "USER_ID",

@@ -80,9 +80,15 @@ For dual-path SAS systems, you can also add:
     - sudo -n /sbin/camcontrol devlist -v
 ```
 
+Create the service account in the CORE web UI first (Accounts > Users): home
+directory under `/mnt`, shell `sh`, Disable Password on, and the app's SSH
+public key pasted in. The admin's one-time bootstrap installs the key and grants
+for that existing account; it does not create CORE accounts and stops before
+any change when the account is missing.
+
 Use the complete generated CORE policy in
 [[SSH Setup and Sudo|SSH-Setup-and-Sudo]]. It includes the bounded bootstrap
-rules, per-HBA forms, both supported `smartctl` paths, and disk-sync polling.
+rules, per-HBA forms, the `/usr/local/sbin/smartctl` reads, and disk-sync polling.
 Do not replace its anchored SMART arguments with wildcards. The SMART regular
 expressions require sudo 1.9.10 or newer. On older hosts, enumerate exact
 per-device commands.
