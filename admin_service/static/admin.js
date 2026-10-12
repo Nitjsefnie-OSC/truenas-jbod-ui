@@ -229,7 +229,8 @@
     setupBootstrapUser: document.getElementById("setup-bootstrap-user"),
     setupBootstrapPassword: document.getElementById("setup-bootstrap-password"),
     setupBootstrapKeyPath: document.getElementById("setup-bootstrap-key-path"),
-    setupBootstrapSudoPassword: document.getElementById("setup-bootstrap-sudo-password"),
+    setupBootstrapServiceHome: document.getElementById("setup-bootstrap-service-home"),
+    setupBootstrapServiceHomeField: document.getElementById("setup-bootstrap-service-home-field"),
     setupBootstrapInstallSudo: document.getElementById("setup-bootstrap-install-sudo"),
     setupBootstrapButton: document.getElementById("setup-bootstrap-button"),
     setupBootstrapResult: document.getElementById("setup-bootstrap-result"),
@@ -4215,7 +4216,7 @@
     if (elements.setupBootstrapCopy) {
       elements.setupBootstrapCopy.textContent = bootstrapSupported
         ? platform === "core"
-          ? "Create the app's user in the CORE web UI first (Accounts > Users: home under /mnt, shell sh, Disable Password, this app's public key). Then log in once as root here to install its key and give it the TrueNAS permissions shown below. Root's password is not saved."
+          ? "Log in once as root to install the app's key and give its user the TrueNAS permissions shown below. If the user doesn't exist yet, fill in Home directory with a folder on a pool under /mnt and setup creates it through TrueNAS. Root's password is not saved."
           : "Log in once as root to create a limited user for this app, install its key and allow only the commands it needs. Root's password is not saved."
         : ipmiOnly
           ? "Not needed for a management-controller-only system. Add SSH later if you want SMART details or bay positions."
@@ -4689,6 +4690,10 @@
     if (elements.setupBootstrapEnabled) {
       elements.setupBootstrapEnabled.disabled = !sshEnabled || !bootstrapSupported;
     }
+    if (elements.setupBootstrapServiceHomeField) {
+      // TrueNAS CORE only: home for a service account bootstrap has to create (#947).
+      elements.setupBootstrapServiceHomeField.classList.toggle("hidden", currentSetupPlatform() !== "core");
+    }
     document.querySelectorAll("[data-bootstrap-field]").forEach((field) => {
       field.disabled = !bootstrapEnabled;
     });
@@ -5143,8 +5148,8 @@
     if (elements.setupBootstrapKeyPath) {
       elements.setupBootstrapKeyPath.value = "";
     }
-    if (elements.setupBootstrapSudoPassword) {
-      elements.setupBootstrapSudoPassword.value = "";
+    if (elements.setupBootstrapServiceHome) {
+      elements.setupBootstrapServiceHome.value = "";
     }
     if (elements.setupBootstrapInstallSudo) {
       elements.setupBootstrapInstallSudo.checked = true;
@@ -5318,8 +5323,8 @@
     if (elements.setupBootstrapKeyPath) {
       elements.setupBootstrapKeyPath.value = "";
     }
-    if (elements.setupBootstrapSudoPassword) {
-      elements.setupBootstrapSudoPassword.value = "";
+    if (elements.setupBootstrapServiceHome) {
+      elements.setupBootstrapServiceHome.value = "";
     }
     if (elements.setupEsxiHostPrepFile) {
       elements.setupEsxiHostPrepFile.value = "";
@@ -5699,12 +5704,14 @@
       port: setupPayload.ssh_port || 22,
       bootstrap_user: elements.setupBootstrapUser?.value?.trim() || "root",
       bootstrap_password: elements.setupBootstrapPassword?.value || null,
-      bootstrap_sudo_password: elements.setupBootstrapSudoPassword?.value || null,
       bootstrap_key_path: elements.setupBootstrapKeyPath?.value?.trim() || null,
       bootstrap_strict_host_key_checking: Boolean(setupPayload.ssh_strict_host_key_checking),
       timeout_seconds: 15,
       service_user: setupPayload.ssh_user,
       service_shell: "/bin/sh",
+      service_home: setupPayload.platform === "core"
+        ? elements.setupBootstrapServiceHome?.value?.trim() || null
+        : null,
       install_sudo_rules: Boolean(elements.setupBootstrapInstallSudo?.checked),
       ...collectBootstrapSudoCommandPayload(),
       ...resolveBootstrapServiceKey(),
@@ -7641,9 +7648,6 @@
       }
       if (elements.setupBootstrapPassword) {
         elements.setupBootstrapPassword.value = "";
-      }
-      if (elements.setupBootstrapSudoPassword) {
-        elements.setupBootstrapSudoPassword.value = "";
       }
       syncSshFields();
       maybeLoadRecommendedCommands();

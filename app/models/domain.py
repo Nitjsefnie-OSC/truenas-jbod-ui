@@ -1308,6 +1308,9 @@ class SystemSetupBootstrapRequest(BaseModel):
     service_key_name: str | None = None
     service_key_path: str | None = None
     service_public_key: str | None = None
+    # TrueNAS CORE only: home for a service account bootstrap has to create.
+    # The bootstrap service validates it before connecting (#947).
+    service_home: str | None = None
     install_sudo_rules: bool = True
     sudo_commands: list[str] = Field(default_factory=list)
     # Saved-system handle used when the editor still shows redacted command placeholders;
@@ -1323,6 +1326,7 @@ class SystemSetupBootstrapRequest(BaseModel):
         "service_key_name",
         "service_key_path",
         "service_public_key",
+        "service_home",
         "ssh_commands_source_system_id",
     )
     @classmethod

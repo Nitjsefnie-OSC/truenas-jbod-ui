@@ -37,7 +37,7 @@ function fixture(method, { realTransport = false } = {}) {
     setupSshHost: field("host-a.example.test"), setupSshUser: field("service-a"),
     setupSshPassword: field("SYNTHETIC-A"), setupSshSudoPassword: field("SYNTHETIC-A"),
     setupBootstrapHost: field("host-a.example.test"), setupBootstrapPassword: field("SYNTHETIC-A"),
-    setupBootstrapSudoPassword: field("SYNTHETIC-A"), setupBootstrapButton: field(), setupResult: field(),
+    setupBootstrapServiceHome: field("/mnt/tank/home/service-a"), setupBootstrapButton: field(), setupResult: field(),
     setupBootstrapEnabled: { checked: true },
     setupProfile: field("profile-a"), setupSshKeyMode: field("generate"), setupSshExistingKey: field("key-a"),
     setupGenerateKeyName: field("key-a"), existingSystemSelect: field("system-a"),
