@@ -168,6 +168,8 @@ That means:
 - saved chassis layouts come from the profile catalog
 - virtual/internal layouts still come from templates like:
   - `4x NVMe Carrier Card`
+  - `2x M.2 carrier (passive)`, for a plain two-slot card where each drive is
+    its own NVMe device
   - `SATADOM Pair`
   - other manual/internal group templates
 

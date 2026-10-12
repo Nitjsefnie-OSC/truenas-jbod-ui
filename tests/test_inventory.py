@@ -12,6 +12,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import get_args
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from tests.mapping_fixtures import write_v1_mappings
@@ -21,6 +22,7 @@ from app.config import (
     HANodeConfig,
     SSHConfig,
     Settings,
+    StorageViewBindingConfig,
     StorageViewConfig,
     SystemConfig,
     TrueNASConfig,
@@ -89,7 +91,7 @@ from app.services.profile_registry import (
 from app.services.ssh_probe import SSHCommandResult, SSHProbe
 from app.services.slot_detail_store import SlotDetailCacheEntry, SlotDetailStore
 from app.services.storage_views import resolve_system_storage_views
-from app.services.storage_view_templates import get_storage_view_template
+from app.services.storage_view_templates import get_storage_view_template, list_storage_view_templates
 from app.services.supermicro_bmc import BMCInventory, BMCControllerRecord, BMCDriveRecord
 from app.services.truenas_ws import TrueNASAPIError, TrueNASRawData
 
@@ -2512,6 +2514,45 @@ class InventoryHelpersTests(unittest.TestCase):
         self.assertEqual(template.rows, 2)
         self.assertEqual(template.columns, 1)
         self.assertEqual(template.slot_layout, [[1], [0]])
+
+    def test_passive_m2_carrier_template_is_visible_with_auto_binding(self) -> None:
+        template = get_storage_view_template("m2-carrier-passive-2")
+
+        self.assertIsNotNone(template)
+        assert template is not None
+        self.assertEqual(template.kind, "nvme_carrier")
+        self.assertEqual(template.slot_count, 2)
+        self.assertEqual(template.slot_layout, [[1], [0]])
+        self.assertEqual(template.default_slot_labels, {0: "M2-1", 1: "M2-2"})
+        self.assertTrue(template.default_render.show_in_main_ui)
+        self.assertEqual(template.default_binding, StorageViewBindingConfig(mode="auto"))
+        self.assertEqual(template.platform_binding_defaults, {})
+        self.assertFalse(template.supports_led)
+        self.assertNotIn("ESXi", f"{template.summary} {template.notes or ''}")
+
+    def test_aoc_template_keeps_esxi_member_ids_in_the_esxi_entry_only(self) -> None:
+        template = get_storage_view_template("aoc-slg4-2h8m2-2")
+
+        self.assertIsNotNone(template)
+        assert template is not None
+        self.assertTrue(template.default_render.show_in_main_ui)
+        self.assertEqual(template.default_binding, StorageViewBindingConfig(mode="hybrid"))
+        self.assertEqual(list(template.platform_binding_defaults), ["esxi"])
+        esxi_binding = template.platform_binding_defaults["esxi"]
+        self.assertEqual(esxi_binding.mode, "hybrid")
+        self.assertEqual(esxi_binding.device_names, ["13:0", "13:1"])
+        self.assertEqual(esxi_binding.pcie_addresses, ["C0 x4", "C1 x4"])
+        self.assertNotIn("ESXi", f"{template.summary} {template.notes or ''}")
+
+    def test_every_template_shows_new_views_and_names_known_platforms(self) -> None:
+        platforms = set(get_args(TrueNASConfig.model_fields["platform"].annotation))
+        for template in list_storage_view_templates():
+            with self.subTest(template=template.id):
+                self.assertTrue(template.default_render.show_in_main_ui)
+                self.assertLessEqual(set(template.platform_binding_defaults), platforms)
+                for field in ("device_names", "pcie_addresses"):
+                    self.assertNotIn("13:0", getattr(template.default_binding, field))
+                    self.assertNotIn("C0 x4", getattr(template.default_binding, field))
 
     def test_summarize_ssh_failures_collapses_transport_level_batch_failure(self) -> None:
         command_results = [

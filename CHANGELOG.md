@@ -59,6 +59,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 - Admin no longer saves the generated Primary Chassis with the layout it picked
   before one was chosen; it follows the system's Chassis layout, stays deleted
   once removed, and the main page labels it Chassis, not Saved view (#959).
+- A view added from the AOC-SLG4-2H8M2 template now shows on the main page and
+  gets the ESXi RAID member IDs only on ESXi, and a 2x M.2 carrier (passive)
+  template was added for plain two-slot cards (#963).
 
 ## v0.24.0-beta.3 - 2026-10-11
 
