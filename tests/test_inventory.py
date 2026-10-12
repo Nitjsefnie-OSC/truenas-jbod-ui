@@ -24269,6 +24269,33 @@ class StorageViewPoolHealthTests(unittest.IsolatedAsyncioTestCase):
             SlotState.empty,
         )
 
+    def test_candidate_without_a_pool_field_takes_the_pool_from_its_member(self) -> None:
+        # A pool-bound view matches on the candidate's pool name; a disk row
+        # without a pool still belongs to the pool its member names.
+        from dataclasses import replace
+
+        from app.services.parsers import parse_pool_query_topology
+
+        service = InventoryDefaultRegressionTests._bare_service("core")
+        disk = replace(self._nvme_record(0), pool_name=None)
+        member = parse_pool_query_topology([_issue_949_flash_pool("DEGRADED", ("FAULTED", "ONLINE"))])["nvd0"]
+
+        candidate = service._serialize_storage_view_candidate(disk, pool_member=member)
+        self.assertEqual(candidate["pool_name"], "flashpool")
+        self.assertIn("pool flashpool", candidate["description"])
+
+        storage_view = StorageViewConfig.model_validate({
+            "id": "flash",
+            "label": "Flash",
+            "kind": "nvme_carrier",
+            "template_id": "nvme-carrier-4",
+            "binding": {"mode": "pool", "pool_names": ["flashpool"]},
+        })
+        runtime_slot = service._build_candidate_runtime_slot(storage_view, 0, "M2-1", 1, candidate)
+        self.assertEqual(runtime_slot.pool_name, "flashpool")
+        self.assertEqual(runtime_slot.state, "fault")
+        self.assertTrue(service._candidate_matches_storage_view(storage_view, candidate))
+
     async def test_bad_disk_health_without_a_pool_member_is_fault(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = self._nvme_view_service(temp_dir, pools=[], disk_health="FAULTED")

@@ -8001,12 +8001,15 @@ class InventoryService:
             or normalize_text(disk.identifier)
             or normalize_text(device_names[0] if device_names else None)
         )
+        # A disk row without a pool still belongs to the pool its member names,
+        # as an enclosure bay does; pool-bound views match on it.
+        pool_name = disk.pool_name or (normalize_text(pool_member.pool_name) if pool_member else None)
         description_parts = [
             "embedded boot media" if disk.raw.get("boot_media") else None,
             normalize_text(disk.bus),
             normalize_text(disk.model),
             size_human,
-            f"pool {disk.pool_name}" if disk.pool_name else None,
+            f"pool {pool_name}" if pool_name else None,
             transport_address,
         ]
         storage_system_id = normalize_text(
@@ -8039,7 +8042,7 @@ class InventoryService:
             "storage_system_id": storage_system_id,
             "storage_system_label": storage_system_id,
             "model": disk.model,
-            "pool_name": disk.pool_name,
+            "pool_name": pool_name,
             "bus": disk.bus,
             "size_bytes": disk.size_bytes,
             "size_human": size_human,
