@@ -351,6 +351,10 @@ class InventorySummary(BaseModel):
     rendered_unique_disk_count: int = 0
     duplicate_disk_view_count: int = 0
     unplaced_disk_count: int = 0
+    # Where the enclosures counted above came from: "truenas", "ssh",
+    # "truenas_and_ssh", "quantastor", or "layout" (a host drawn from its
+    # enclosure layout). A plain string, so an older saved copy still loads.
+    enclosure_source: str = "truenas"
 
 
 class PlatformCapability(BaseModel):

@@ -24055,6 +24055,164 @@ class InventoryDefaultRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.view_order[:2], [f"enclosure:{fx.REAR_12_ID}", f"enclosure:{fx.FRONT_24_ID}"])
         self.assertNotIn(f"enclosure:{fx.OLD_COMBINED_ID}", runtime.view_order)
 
+    async def test_core_ssh_mapped_bays_drop_the_no_drive_bays_warning(self) -> None:
+        """CORE with no API enclosures but SSH-mapped bays does not ask for SSH (#950)."""
+        from tests import core_ses_fixtures as fx
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._core_ssh_only_service(temp_dir, {"sudo -n /usr/sbin/sesutil map": fx.SSG_SESUTIL_MAP})
+            snapshot = await service.get_snapshot(force_refresh=True)
+
+        self.assertEqual(len([slot for slot in snapshot.slots if slot.device_name]), 6)
+        warning_text = "\n".join(snapshot.warnings)
+        self.assertNotIn("did not report any drive bays", warning_text)
+        self.assertNotIn("Turn on SSH", warning_text)
+        self.assertEqual(snapshot.summary.enclosure_source, "ssh")
+
+    async def test_core_ssh_only_bays_name_ssh_as_their_position_source(self) -> None:
+        """With no disk records, SES device names still place the bays over SSH (#950)."""
+        from tests import core_ses_fixtures as fx
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._core_ssh_only_service(temp_dir, {"sudo -n /usr/sbin/sesutil map": fx.SSG_SESUTIL_MAP})
+            snapshot = await service.get_snapshot(force_refresh=True)
+
+        placed = [slot for slot in snapshot.slots if slot.device_name]
+        self.assertEqual(len(placed), 6)
+        self.assertEqual({slot.mapping_source for slot in placed}, {"device-name"})
+        self.assertEqual(
+            {slot.mapping_source for slot in snapshot.slots if not slot.present},
+            {"ses-empty"},
+        )
+
+    async def test_core_without_ssh_bays_keeps_the_no_drive_bays_warning(self) -> None:
+        no_bays = (
+            "TrueNAS did not report any drive bays for this system. Disks and pools are shown without "
+            "bay positions. Turn on SSH or set positions by hand to map bays."
+        )
+        raw_data = self._core_api_raw_data(2)
+        raw_data.enclosures = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api_only = await self._core_service(temp_dir, raw_data).get_snapshot(force_refresh=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ssh_without_bays = await self._core_ssh_only_service(temp_dir, {}).get_snapshot(force_refresh=True)
+
+        self.assertIn(no_bays, api_only.warnings)
+        self.assertIn(no_bays, ssh_without_bays.warnings)
+
+    async def test_core_api_enclosures_are_reported_by_truenas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot = await self._core_service(temp_dir, self._core_api_raw_data(12)).get_snapshot(force_refresh=True)
+
+        self.assertEqual(snapshot.summary.enclosure_count, 1)
+        self.assertEqual(snapshot.summary.enclosure_source, "truenas")
+
+    def test_enclosure_source_names_where_the_enclosures_came_from(self) -> None:
+        def raw(*ids: str) -> TrueNASRawData:
+            return TrueNASRawData(
+                enclosures=[{"id": item} for item in ids], disks=[], pools=[],
+                disk_temperatures={}, smart_test_results=[],
+            )
+
+        def options(*ids: str, kind: str = "physical") -> list[EnclosureOption]:
+            return [EnclosureOption(id=item, label=item, kind=kind) for item in ids]
+
+        core = self._bare_service("core")
+        self.assertEqual(core._enclosure_source(raw("enc-a"), options("enc-a")), "truenas")
+        self.assertEqual(core._enclosure_source(raw(), options("ses-a", "ses-b")), "ssh")
+        self.assertEqual(core._enclosure_source(raw(), options("ses-a+ses-b")), "ssh")
+        self.assertEqual(core._enclosure_source(raw("enc-a"), options("enc-a", "ses-b")), "truenas_and_ssh")
+        # Two API parts stacked into one shelf over SSH: the shelf is SSH's.
+        self.assertEqual(core._enclosure_source(raw("enc-a", "enc-b"), options("enc-a+enc-b")), "truenas_and_ssh")
+        # Nothing found: TrueNAS reported none and SSH added none.
+        self.assertEqual(core._enclosure_source(raw(), []), "truenas")
+        # A flat list of every disk is not an enclosure found over SSH.
+        self.assertEqual(core._enclosure_source(raw(), options("all-disks", kind="virtual")), "truenas")
+        self.assertEqual(self._bare_service("scale")._enclosure_source(raw(), options("ses-a")), "ssh")
+        self.assertEqual(self._bare_service("quantastor")._enclosure_source(raw("node-a"), options("node-a")), "quantastor")
+        for platform in ("linux", "esxi", "ipmi"):
+            with self.subTest(platform=platform):
+                self.assertEqual(self._bare_service(platform)._enclosure_source(raw(), options("profile-a")), "layout")
+
+    def test_every_mapping_source_the_backend_emits_has_a_page_label(self) -> None:
+        """No raw mapping-source code reaches "Bay positions come from" (#950)."""
+        import ast
+        import re
+        import typing
+
+        def leaves(node: ast.AST | None) -> set[str]:
+            # Only values the expression can produce, not the strings it tests.
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return {node.value}
+            if isinstance(node, ast.IfExp):
+                return leaves(node.body) | leaves(node.orelse)
+            if isinstance(node, ast.BoolOp):
+                return set().union(*(leaves(value) for value in node.values))
+            return set()
+
+        def emitted(path: Path) -> set[str]:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            values: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    func = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+                    for keyword in node.keywords:
+                        if keyword.arg in {"mapping_source", "resolution_source"} or (
+                            func in {"DiskResolution", "ManualMapping"} and keyword.arg == "source"
+                        ):
+                            values |= leaves(keyword.value)
+                        # A saved mapping's source reaches the slot, including
+                        # the one an import writes with model_copy(update=...).
+                        if func == "model_copy" and keyword.arg == "update" and isinstance(keyword.value, ast.Dict):
+                            for key, value in zip(keyword.value.keys, keyword.value.values):
+                                if isinstance(key, ast.Constant) and key.value == "source":
+                                    values |= leaves(value)
+                elif isinstance(node, ast.Dict):
+                    for key, value in zip(node.keys, node.values):
+                        if isinstance(key, ast.Constant) and key.value in {"mapping_source", "mapping_resolution_source"}:
+                            values |= leaves(value)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if (
+                            isinstance(target, ast.Subscript)
+                            and isinstance(target.slice, ast.Constant)
+                            and target.slice.value in {"mapping_source", "mapping_resolution_source"}
+                        ):
+                            values |= leaves(node.value)
+                elif isinstance(node, ast.FunctionDef) and node.name == "_resolve_disk_for_slot":
+                    for inner in ast.walk(node):
+                        if isinstance(inner, ast.Assign) and any(
+                            isinstance(target, ast.Name) and target.id == "source" for target in inner.targets
+                        ):
+                            values |= leaves(inner.value)
+                        if (
+                            isinstance(inner, ast.For)
+                            and isinstance(inner.target, ast.Tuple)
+                            and isinstance(inner.target.elts[0], ast.Name)
+                            and inner.target.elts[0].id == "source"
+                            and isinstance(inner.iter, ast.Tuple)
+                        ):
+                            for item in inner.iter.elts:
+                                if isinstance(item, ast.Tuple):
+                                    values |= leaves(item.elts[0])
+            return values
+
+        root = Path(__file__).resolve().parents[1]
+        backend = emitted(root / "app/services/inventory.py") | emitted(root / "app/services/public_demo_fixture.py")
+        backend.add(ManualMapping.model_fields["source"].default)
+        backend |= set(typing.get_args(StorageViewRuntimeSlot.model_fields["source"].annotation))
+        # The walk must keep finding the values the issue names.
+        self.assertTrue(
+            {"device-name", "ses-empty", "api-slot", "device-hint", "snapshot_slot", "import"} <= backend,
+            backend,
+        )
+
+        app_source = (root / "app/static/app.js").read_text(encoding="utf-8")
+        start = app_source.index("function mappingSourceLabel(")
+        labels_block = app_source[start:app_source.index("};", start)]
+        labelled = set(re.findall(r'^\s*"?([A-Za-z0-9_-]+)"?:\s*"', labels_block, flags=re.MULTILINE))
+        self.assertEqual(sorted(backend - labelled), [])
+
     def test_core_defaults_read_pool_members_by_device(self) -> None:
         from app.services.system_setup import default_ssh_commands_for_platform
 

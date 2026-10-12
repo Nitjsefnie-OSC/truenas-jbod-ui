@@ -47,6 +47,11 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   script on stdin, stops before any change when the CORE account is missing or
   its home is not under `/mnt`, and stores SMART grants that still match after
   the middleware escapes commas (#957).
+- On TrueNAS CORE with SSH, the page no longer asked to turn on SSH when SSH
+  had mapped the bays, named the real source of enclosures and bay positions,
+  said "Empty" for an empty NVMe slot, did not offer locate lights on a view
+  without them, and dropped "Previous version unknown" on a first start
+  (#958).
 - Admin no longer saves the generated Primary Chassis with the layout it picked
   before one was chosen; it follows the system's Chassis layout, stays deleted
   once removed, and the main page labels it Chassis, not Saved view (#959).

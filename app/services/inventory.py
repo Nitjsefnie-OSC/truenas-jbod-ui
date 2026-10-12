@@ -6944,6 +6944,7 @@ class InventoryService:
                 warnings.append(warning)
 
         has_scale_linux_ses = self._has_scale_linux_ses(ssh_data)
+        core_no_bays_warning = None
         if self.system.truenas.platform not in {"linux", "esxi", "ipmi"} and not raw_data.enclosures:
             if self.system.truenas.platform == "scale" and has_scale_linux_ses:
                 warnings.append(
@@ -6959,10 +6960,12 @@ class InventoryService:
                     "QuantaStor did not report any storage systems, so no enclosure can be drawn yet."
                 )
             else:
-                warnings.append(
+                # CORE: withdrawn below when SSH maps the bays (#950).
+                core_no_bays_warning = (
                     "TrueNAS did not report any drive bays for this system. Disks and pools are shown without "
                     "bay positions. Turn on SSH or set positions by hand to map bays."
                 )
+                warnings.append(core_no_bays_warning)
 
         def read_inputs():
             mappings = self.mapping_store.load_read_snapshot()
@@ -6988,6 +6991,15 @@ class InventoryService:
                 )
         finally:
             _snapshot_read_inputs.reset(token)
+        enclosure_source = self._enclosure_source(raw_data, available_enclosures)
+        if (
+            core_no_bays_warning
+            and enclosure_source == "ssh"
+            and any(enclosure.slots for enclosure in ssh_data.ses_enclosures)
+            and core_no_bays_warning in warnings
+        ):
+            # SSH drew the bays, so the page is not "without bay positions".
+            warnings.remove(core_no_bays_warning)
         option_by_id = {item.id: item for item in available_enclosures}
         resolved_enclosure_id = None
         if selected_enclosure_id and selected_enclosure_id in option_by_id:
@@ -7106,6 +7118,7 @@ class InventoryService:
             rendered_unique_disk_count=retention.rendered_unique_disk_count,
             duplicate_disk_view_count=retention.duplicate_disk_view_count,
             unplaced_disk_count=retention.unplaced_disk_count,
+            enclosure_source=enclosure_source,
         )
         capabilities = self._build_platform_capabilities(
             slots=slots,
@@ -12691,6 +12704,35 @@ class InventoryService:
             return option_by_id[selected_meta_id]
         return options[0] if options else None
 
+    def _enclosure_source(
+        self,
+        raw_data: TrueNASRawData,
+        available_enclosures: list[EnclosureOption],
+    ) -> str:
+        """Name where the summary's enclosures came from (#950)."""
+        platform = self.system.truenas.platform
+        if platform in {"linux", "esxi", "ipmi"}:
+            return "layout"
+        if platform == "quantastor":
+            return "quantastor"
+        api_ids = {
+            enclosure_id
+            for enclosure_id in (normalize_text(str(item.get("id") or "")) for item in raw_data.enclosures)
+            if enclosure_id
+        }
+        # An option the API did not report as such was found over SSH: an SES
+        # enclosure, or a shelf SSH stacked from several parts even when the
+        # API listed each part. A drawer view counts as its shelf. A flat list
+        # of every disk (a virtual option) is not an enclosure at all.
+        found_over_ssh = any(
+            option.kind == "physical"
+            and resolve_physical_mapping_scope(option.id) not in api_ids
+            for option in available_enclosures
+        )
+        if not found_over_ssh:
+            return "truenas"
+        return "truenas_and_ssh" if api_ids else "ssh"
+
     @staticmethod
     def _has_scale_linux_ses(ssh_data: ParsedSSHData) -> bool:
         return any(
@@ -14292,6 +14334,17 @@ class InventoryService:
         )
         if not disk and self._is_placeholder_hint_device(device_name):
             device_name = None
+        ses_device_names_source = normalize_text(raw_slot_status.get("device_names_source"))
+        if (
+            not disk
+            and resolution_source in {None, "unknown"}
+            and device_name
+            and ses_device_names_source
+            and device_name in {normalize_device_name(item) for item in device_names}
+        ):
+            # No disk record matched (CORE over SSH without the API), but SES
+            # named the device in this bay, so the position came from SSH (#950).
+            resolution_source = "enclosure-sysfs" if ses_device_names_source == "enclosure_sysfs" else "device-name"
         gptid = ssh_data.glabel.device_to_gptid.get(device_name.lower()) if device_name else None
         zpool = self._lookup_zpool_member(disk, device_name, gptid, ssh_data, api_topology_members)
         for peer in () if zpool else bay_peer_devices:
