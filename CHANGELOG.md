@@ -47,6 +47,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   script on stdin, stops before any change when the CORE account is missing or
   its home is not under `/mnt`, and stores SMART grants that still match after
   the middleware escapes commas (#957).
+- Admin no longer saves the generated Primary Chassis with the layout it picked
+  before one was chosen; it follows the system's Chassis layout, stays deleted
+  once removed, and the main page labels it Chassis, not Saved view (#959).
 
 ## v0.24.0-beta.3 - 2026-10-11
 
