@@ -178,6 +178,7 @@
     setupApiKey: document.getElementById("setup-api-key"),
     setupApiUser: document.getElementById("setup-api-user"),
     setupApiPassword: document.getElementById("setup-api-password"),
+    setupApiSecretReentryNote: document.getElementById("setup-api-secret-reentry-note"),
     setupBmcEnabled: document.getElementById("setup-bmc-enabled"),
     setupBmcHost: document.getElementById("setup-bmc-host"),
     setupBmcUsername: document.getElementById("setup-bmc-username"),
@@ -432,10 +433,37 @@
     renderTlsTrustStatus();
   }
 
+  // #954: the bundle check depends on the host, bundle and verify-as name, so a
+  // remembered result only applies while those three fields are unchanged.
+  function currentTlsSettingsKey() {
+    return JSON.stringify([
+      String(collectTlsTargetHost() || "").trim(),
+      String(elements.setupTlsCaBundlePath?.value || "").trim(),
+      String(collectTlsServerName() || "").trim(),
+    ]);
+  }
+
+  function savedSystemTlsSettingsKey(system) {
+    return JSON.stringify([
+      String(system?.truenas_host || "").trim(),
+      String(system?.tls_ca_bundle_path || "").trim(),
+      String(system?.tls_server_name || "").trim(),
+    ]);
+  }
+
   function syncTlsTrustStatus(validation = null) {
     const bundlePath = elements.setupTlsCaBundlePath?.value?.trim() || "";
     const host = collectTlsTargetHost() || "";
     const serverName = collectTlsServerName() || "";
+    if (validation) {
+      state.lastTlsValidation = { key: currentTlsSettingsKey(), validation };
+    } else if (
+      elements.setupVerifySsl?.checked
+      && state.lastTlsValidation
+      && state.lastTlsValidation.key === currentTlsSettingsKey()
+    ) {
+      validation = state.lastTlsValidation.validation;
+    }
     if (validation && validation.validated) {
       setTlsTrustStatus({
         level: "trusted",
@@ -459,6 +487,51 @@
         }),
     });
     return false;
+  }
+
+  // #954: re-check a loaded system's saved bundle so the status shows the real
+  // failure (expired, name mismatch, unreachable) instead of "not validated yet".
+  // Bounded: no request when verification is off or no bundle is saved.
+  async function refreshSavedTlsTrustStatus(system) {
+    const sequence = (state.tlsSavedStatusSeq || 0) + 1;
+    state.tlsSavedStatusSeq = sequence;
+    state.lastTlsValidation = null;
+    const bundlePath = String(system?.tls_ca_bundle_path || "").trim();
+    if (!system?.id || !system.verify_ssl || !bundlePath) {
+      return;
+    }
+    const key = savedSystemTlsSettingsKey(system);
+    if (key !== currentTlsSettingsKey()) {
+      return;
+    }
+    const current = () => state.tlsSavedStatusSeq === sequence
+      && state.loadedSystemId === system.id
+      && currentTlsSettingsKey() === key;
+    setTlsTrustStatus({
+      level: "untrusted",
+      label: "Checking",
+      detail: `Checking the saved bundle ${bundlePath} against ${system.truenas_host || "this host"}...`,
+    });
+    let payload;
+    try {
+      payload = await fetchJson(`/api/admin/tls/saved-status?system_id=${encodeURIComponent(system.id)}`);
+    } catch (error) {
+      if (current()) {
+        setTlsTrustStatus({
+          level: "untrusted",
+          label: "Untrusted",
+          detail: `The saved bundle could not be re-checked: ${error.message || error}`,
+        });
+      }
+      return;
+    }
+    if (!current()) {
+      return;
+    }
+    if (payload?.validation) {
+      state.lastTlsValidation = { key, validation: payload.validation };
+    }
+    syncTlsTrustStatus();
   }
 
   function formatLocalTimestamp(value) {
@@ -1182,6 +1255,90 @@
     field.placeholder = configured ? "Saved value retained unless replaced" : "";
   }
 
+  // #954: compare hosts the way the server's credential authority does: scheme
+  // and hostname case, the scheme's default port, and a trailing slash do not count.
+  function apiEndpointIdentity(value) {
+    const text = String(value || "").trim();
+    const match = /^(?:([a-z][a-z0-9+.-]*):)?\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i.exec(
+      text.includes("://") ? text : `//${text}`
+    );
+    if (!text || !match) {
+      return text;
+    }
+    const scheme = String(match[1] || "").toLowerCase();
+    const authority = match[2];
+    const at = authority.lastIndexOf("@");
+    const userinfo = at >= 0 ? authority.slice(0, at + 1) : "";
+    const hostPort = authority.slice(at + 1);
+    const portMatch = /^(\[[^\]]*\]|[^:]*)(?::(\d*))?$/.exec(hostPort);
+    const hostname = String(portMatch ? portMatch[1] : hostPort).toLowerCase();
+    const defaultPort = { http: "80", https: "443" }[scheme] || "";
+    const port = portMatch && portMatch[2] ? String(Number(portMatch[2])) : defaultPort;
+    return JSON.stringify([scheme, userinfo, hostname, port, match[3].replace(/\/+$/, ""), match[4] || "", match[5] || ""]);
+  }
+
+  // Mirrors the server's API credential authority (platform, host, user, TLS
+  // settings). An empty bundle path or verify-as name keeps the saved value on
+  // save, so it is not a change here either.
+  function apiCredentialSettingsChanged(system) {
+    if (!system) {
+      return false;
+    }
+    const text = (value) => String(value || "").trim();
+    const current = [
+      text(elements.setupPlatform?.value || "core").toLowerCase(),
+      apiEndpointIdentity(elements.setupTruenasHost?.value),
+      text(elements.setupApiUser?.value),
+      Boolean(elements.setupVerifySsl?.checked),
+      text(elements.setupTlsCaBundlePath?.value) || text(system.tls_ca_bundle_path),
+      text(collectTlsServerName()) || text(system.tls_server_name),
+    ];
+    const saved = [
+      text(system.platform || "core").toLowerCase(),
+      apiEndpointIdentity(system.truenas_host),
+      text(system.api_user),
+      Boolean(system.verify_ssl),
+      text(system.tls_ca_bundle_path),
+      text(system.tls_server_name),
+    ];
+    return current.some((value, index) => value !== saved[index]);
+  }
+
+  // The server refuses to reuse a saved API key or password once the host, user,
+  // or TLS settings change; mark the empty secret field before Save, not after.
+  function syncApiSecretReentry() {
+    const system = isEditingLoadedSystem() ? getSystemById(state.loadedSystemId) : null;
+    const changed = apiCredentialSettingsChanged(system);
+    const pending = [];
+    [
+      [elements.setupApiKey, "api_key_configured", "api_key", "API key"],
+      [elements.setupApiPassword, "api_password_configured", "api_password", "API password"],
+    ].forEach(([field, configuredKey, legacyKey, label]) => {
+      if (!field) {
+        return;
+      }
+      const saved = savedSecretConfigured(system, configuredKey, legacyKey);
+      const wasMarked = field.classList.contains("needs-reentry");
+      const needsReentry = Boolean(changed && saved && !String(field.value || "").trim());
+      field.classList.toggle("needs-reentry", needsReentry);
+      if (needsReentry) {
+        field.setAttribute("aria-invalid", "true");
+        field.placeholder = `Enter the ${label} again before saving`;
+        pending.push(label);
+      } else if (wasMarked) {
+        field.removeAttribute("aria-invalid");
+        field.placeholder = saved ? "Saved value retained unless replaced" : "";
+      }
+    });
+    const note = elements.setupApiSecretReentryNote;
+    if (note) {
+      note.textContent = pending.length
+        ? `You changed the host, user, or TLS settings, so the saved ${pending.join(" and ")} can't be reused. Enter ${pending.length === 1 ? "it" : "them"} again before saving.`
+        : "";
+      note.classList.toggle("hidden", pending.length === 0);
+    }
+  }
+
   function collectSecretField(field, system, configuredKey, legacyKey, { preserve = false, trim = false } = {}) {
     let value = field?.value || "";
     if (trim) {
@@ -1473,6 +1630,28 @@
     return suggestedConnectionHost() || "trusted-remote";
   }
 
+  function formatTlsValidityDate(value) {
+    const date = new Date(String(value || ""));
+    if (Number.isNaN(date.getTime())) {
+      return String(value || "an unknown date");
+    }
+    const pad = (number) => String(number).padStart(2, "0");
+    return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} `
+      + `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`;
+  }
+
+  // #954: an expired or not-yet-valid leaf cannot pass verification, so say so
+  // before anyone pins it.
+  function tlsLeafValidityWarning(leaf) {
+    if (leaf?.expired) {
+      return `This certificate expired on ${formatTlsValidityDate(leaf.not_valid_after)}. Pinning it won't work. Renew it on the server, then trust the new one.`;
+    }
+    if (leaf?.not_yet_valid) {
+      return `This certificate is not valid until ${formatTlsValidityDate(leaf.not_valid_before)}. Pinning it won't work yet. Check the server's clock or certificate dates, then trust it again.`;
+    }
+    return "";
+  }
+
   function renderTlsInspection() {
     if (!elements.setupTlsInspectionMeta || !elements.setupTlsLeafDetails || !elements.setupTlsInspectionResult) {
       return;
@@ -1524,7 +1703,11 @@
     elements.setupTlsInspectionMeta.innerHTML = metaChips
       .map((item) => `<span class="meta-chip">${escapeHtml(item)}</span>`)
       .join("");
+    const validityWarning = tlsLeafValidityWarning(leaf);
     elements.setupTlsLeafDetails.innerHTML = [
+      validityWarning
+        ? `<div class="tls-validity-warning" role="alert"><strong>Warning</strong><span class="tls-value-block">${escapeHtml(validityWarning)}</span></div>`
+        : "",
       `<div><strong>Subject</strong>${formatWrappedValue(leaf.subject)}</div>`,
       `<div><strong>Issuer</strong>${formatWrappedValue(leaf.issuer)}</div>`,
       `<div><strong>SHA-256</strong>${formatFingerprintValue(leaf.sha256_fingerprint)}</div>`,
@@ -5108,6 +5291,7 @@
     state.loadedSystemId = null;
     state.selectedProfileId = "";
     state.tlsInspection = null;
+    state.lastTlsValidation = null;
     state.haNodes = [];
     state.haNodesLoading = false;
     state.sshUserAutoPlatform = null;
@@ -5253,6 +5437,7 @@
     syncTlsServerNameHelp();
     renderTlsServerNameSuggestions();
     syncTlsTrustStatus();
+    syncApiSecretReentry();
     renderProfileOptions();
     renderProfilePreview();
     renderProfileCatalog();
@@ -5409,6 +5594,7 @@
       elements.setupEsxiHostPrepDetail.textContent = "";
     }
     state.tlsInspection = null;
+    state.lastTlsValidation = null;
     if (elements.setupTlsCaFile) {
       elements.setupTlsCaFile.value = "";
     }
@@ -5421,6 +5607,8 @@
         : "Import your own CA certificate if your NAS uses one.";
     }
     syncTlsTrustStatus();
+    syncApiSecretReentry();
+    void refreshSavedTlsTrustStatus(system);
     const matchingKey = state.sshKeys.find((key) =>
       [key.runtime_private_path, key.private_path].filter(Boolean).includes(system.ssh_key_path || "")
     );
@@ -6551,10 +6739,18 @@
       renderTlsInspection();
       syncTlsServerNameHelp();
       renderTlsServerNameSuggestions();
+      const validityWarning = tlsLeafValidityWarning(payload.inspection?.leaf);
       if (elements.setupTlsInspectionResult) {
-        elements.setupTlsInspectionResult.textContent = `Inspected ${payload.inspection?.host || host}. Compare the fingerprints before trusting or importing anything.`;
+        elements.setupTlsInspectionResult.textContent = validityWarning
+          ? `Inspected ${payload.inspection?.host || host}. ${validityWarning}`
+          : `Inspected ${payload.inspection?.host || host}. Compare the fingerprints before trusting or importing anything.`;
       }
-      setBanner(`Fetched the presented TLS certificate details for ${payload.inspection?.host || host}.`, "success");
+      setBanner(
+        validityWarning
+          ? `Fetched the TLS certificate for ${payload.inspection?.host || host}. ${validityWarning}`
+          : `Fetched the presented TLS certificate details for ${payload.inspection?.host || host}.`,
+        validityWarning ? "error" : "success"
+      );
     } catch (error) {
       if (elements.setupTlsInspectionResult) {
         elements.setupTlsInspectionResult.textContent = `TLS inspection failed: ${error.message || error}`;
@@ -6596,20 +6792,24 @@
       if (elements.setupTlsCaBundlePath) {
         elements.setupTlsCaBundlePath.value = payload.bundle_path || "";
       }
-      if (elements.setupVerifySsl) {
+      // #954: only turn certificate checks on for a bundle that just passed.
+      const validated = Boolean(payload.validation?.validated);
+      if (elements.setupVerifySsl && validated) {
         elements.setupVerifySsl.checked = true;
       }
+      const leftOff = !validated && !elements.setupVerifySsl?.checked;
       recordSetupDraftChange(draftBefore);
       renderTlsInspection();
       syncVerifySslHelp();
       syncTlsServerNameHelp();
       renderTlsServerNameSuggestions();
+      syncApiSecretReentry();
       const trusted = syncTlsTrustStatus(payload.validation || null);
       const validationDetail = buildTlsValidationSuggestion(payload.validation);
       if (elements.setupTlsImportResult) {
         elements.setupTlsImportResult.textContent = trusted
           ? `Saved the presented remote certificate material to ${payload.bundle_path} and verified it for ${payload.validation?.host || host}.`
-          : `Saved the presented remote certificate material to ${payload.bundle_path}, but the validation check still needs attention. ${validationDetail || ""}`.trim();
+          : `Saved the presented remote certificate material to ${payload.bundle_path}, but the validation check still needs attention. ${validationDetail || ""}${leftOff ? " Certificate checks were left off." : " Certificate checks are still on, so refreshes will fail until this passes."}`.trim();
       }
       setBanner(
         trusted
@@ -6658,17 +6858,21 @@
       if (elements.setupTlsCaBundlePath) {
         elements.setupTlsCaBundlePath.value = payload.bundle_path || "";
       }
-      if (elements.setupVerifySsl) {
+      // #954: only turn certificate checks on for a bundle that just passed.
+      const validated = Boolean(payload.validation?.validated);
+      if (elements.setupVerifySsl && validated) {
         elements.setupVerifySsl.checked = true;
       }
+      const leftOff = !validated && !elements.setupVerifySsl?.checked;
       recordSetupDraftChange(draftBefore);
       syncVerifySslHelp();
+      syncApiSecretReentry();
       const trusted = syncTlsTrustStatus(payload.validation || null);
       const validationDetail = buildTlsValidationSuggestion(payload.validation);
       if (elements.setupTlsImportResult) {
         elements.setupTlsImportResult.textContent = trusted
           ? `Imported ${payload.certificate_count} certificate${payload.certificate_count === 1 ? "" : "s"} into ${payload.bundle_path} and verified it for ${payload.validation?.host || collectTlsTargetHost() || "this host"}.`
-          : `Imported ${payload.certificate_count} certificate${payload.certificate_count === 1 ? "" : "s"} into ${payload.bundle_path}. ${validationDetail || defaultTlsTrustDetail({ bundlePath: payload.bundle_path })}`.trim();
+          : `Imported ${payload.certificate_count} certificate${payload.certificate_count === 1 ? "" : "s"} into ${payload.bundle_path}. ${validationDetail || defaultTlsTrustDetail({ bundlePath: payload.bundle_path })}${leftOff ? " Certificate checks were left off." : " Certificate checks are still on, so refreshes will fail until this passes."}`.trim();
       }
       setBanner(
         trusted
@@ -8322,16 +8526,28 @@
     elements.setupVerifySsl?.addEventListener("change", () => {
       syncVerifySslHelp();
       syncTlsTrustStatus();
+      syncApiSecretReentry();
     });
     elements.setupTlsCaBundlePath?.addEventListener("input", () => {
       syncVerifySslHelp();
       syncTlsTrustStatus();
+      syncApiSecretReentry();
     });
     elements.setupTlsServerName?.addEventListener("input", () => {
       syncVerifySslHelp();
       syncTlsServerNameHelp();
       renderTlsServerNameSuggestions();
       syncTlsTrustStatus();
+      syncApiSecretReentry();
+    });
+    [elements.setupApiKey, elements.setupApiPassword, elements.setupApiUser].forEach((field) => {
+      field?.addEventListener("input", () => {
+        syncApiSecretReentry();
+      });
+    });
+    // The platform is part of the API credential authority too.
+    elements.setupPlatform?.addEventListener("change", () => {
+      syncApiSecretReentry();
     });
     elements.setupTlsServerNameSuggestions?.addEventListener("click", (event) => {
       const button = event.target instanceof Element ? event.target.closest("[data-tls-server-name]") : null;
@@ -8345,6 +8561,7 @@
       syncTlsServerNameHelp();
       renderTlsServerNameSuggestions();
       syncTlsTrustStatus();
+      syncApiSecretReentry();
     });
     elements.setupInspectTlsButton?.addEventListener("click", () => {
       void inspectTlsCertificate();
@@ -8668,6 +8885,7 @@
       syncTlsServerNameHelp();
       renderTlsServerNameSuggestions();
       syncTlsTrustStatus();
+      syncApiSecretReentry();
       renderTlsInspection();
       if (elements.setupTlsInspectionResult) {
         elements.setupTlsInspectionResult.textContent = "Shows the certificate the server sends so you can compare its fingerprint before trusting it.";

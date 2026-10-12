@@ -86,6 +86,7 @@ ADMIN_ROUTE_MATRIX = [
     ("/api/admin/tls/inspect", ("POST",), "inspect_tls_certificate", "starlette.responses.JSONResponse", None),
     ("/api/admin/tls/import", ("POST",), "import_tls_bundle", "starlette.responses.JSONResponse", None),
     ("/api/admin/tls/trust-remote", ("POST",), "trust_remote_tls_certificate", "starlette.responses.JSONResponse", None),
+    ("/api/admin/tls/saved-status", ("GET",), "saved_tls_bundle_status", "starlette.responses.JSONResponse", None),
     ("/api/admin/system-setup/quantastor-nodes", ("POST",), "discover_quantastor_nodes", "starlette.responses.JSONResponse", None),
     ("/api/admin/system-setup", ("POST",), "create_system", "starlette.responses.JSONResponse", None),
     ("/api/admin/system-setup/demo", ("POST",), "create_demo_system", "starlette.responses.JSONResponse", None),

@@ -48,6 +48,29 @@ class TlsTrustConfigurationError(RuntimeError):
         )
 
 
+def certificate_verification_failure_reason(exc: BaseException) -> str | None:
+    """Return the verifier's reason when `exc` was caused by a failed certificate check.
+
+    #954: the inventory reported an expired or mismatched certificate as an
+    unreachable API. The SSL error can sit directly on the exception, in its
+    `__cause__`/`__context__` chain, or in a `URLError.reason`.
+    """
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            reason = " ".join(str(getattr(current, "verify_message", None) or "").split())
+            return reason[:200] or "the certificate could not be verified"
+        for linked in (getattr(current, "reason", None), current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+    return None
+
+
 def build_tls_client_context(config: TrueNASConfig) -> ssl.SSLContext | None:
     if not host_uses_tls(config.host):
         return None

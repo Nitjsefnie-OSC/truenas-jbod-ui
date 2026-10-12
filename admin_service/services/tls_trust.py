@@ -4,6 +4,7 @@ import hashlib
 import re
 import socket
 import ssl
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -12,7 +13,11 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 
 from app.config import TrueNASConfig
-from app.services.tls_context import build_tls_client_context, resolve_tls_server_name
+from app.services.tls_context import (
+    TlsTrustConfigurationError,
+    build_tls_client_context,
+    resolve_tls_server_name,
+)
 
 
 PEM_CERT_PATTERN = re.compile(
@@ -107,6 +112,11 @@ class TLSTrustStoreService:
             timeout_seconds=timeout_seconds,
             tls_server_name=tls_server_name,
         )
+        # #954: pinning a leaf outside its validity window cannot pass
+        # verification, so refuse before writing it to the trust store.
+        validity_problem = self.leaf_validity_problem(inspection.get("leaf"))
+        if validity_problem:
+            raise ValueError(validity_problem)
         imported = self.import_pem_bundle(
             inspection["pem_chain"],
             bundle_name=bundle_name,
@@ -144,12 +154,23 @@ class TLSTrustStoreService:
             tls_ca_bundle_path=str(bundle_file),
             tls_server_name=tls_server_name,
         )
-        context = build_tls_client_context(
-            config
-        )
+        server_hostname = resolve_tls_server_name(config) or connect_host
+        try:
+            context = build_tls_client_context(
+                config
+            )
+        except TlsTrustConfigurationError as exc:
+            return {
+                "validated": False,
+                "host": normalized_url,
+                "connect_host": connect_host,
+                "server_hostname": server_hostname,
+                "port": port,
+                "bundle_path": str(bundle_file),
+                "detail": str(exc),
+            }
         if context is None:
             raise ValueError("TLS validation only supports HTTPS targets.")
-        server_hostname = resolve_tls_server_name(config) or connect_host
 
         try:
             with socket.create_connection((connect_host, port), timeout=timeout_seconds) as raw_socket:
@@ -196,6 +217,38 @@ class TLSTrustStoreService:
         }
 
     @staticmethod
+    def leaf_validity_problem(leaf: dict[str, Any] | None) -> str | None:
+        """Return why a serialized leaf cannot be pinned, or None when it is in date."""
+        if not isinstance(leaf, dict):
+            return None
+        if leaf.get("expired"):
+            expired_on = TLSTrustStoreService._format_validity_date(leaf.get("not_valid_after"))
+            return (
+                f"This certificate expired on {expired_on}. Pinning it won't work. "
+                "Renew it on the server, then trust the new one."
+            )
+        if leaf.get("not_yet_valid"):
+            valid_from = TLSTrustStoreService._format_validity_date(leaf.get("not_valid_before"))
+            return (
+                f"This certificate is not valid until {valid_from}. Pinning it won't work yet. "
+                "Check the server's clock or certificate dates, then trust it again."
+            )
+        return None
+
+    @staticmethod
+    def _format_validity_date(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "an unknown date"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return text
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    @staticmethod
     def _normalize_target(host: str) -> tuple[str, str, int]:
         raw_value = str(host or "").strip()
         if not raw_value:
@@ -229,12 +282,15 @@ class TLSTrustStoreService:
             serialization.Encoding.DER,
             serialization.PublicFormat.SubjectPublicKeyInfo,
         )
+        now = datetime.now(timezone.utc)
         return {
             "subject": certificate.subject.rfc4514_string(),
             "issuer": certificate.issuer.rfc4514_string(),
             "serial_number": format(certificate.serial_number, "X"),
             "not_valid_before": certificate.not_valid_before_utc.isoformat(),
             "not_valid_after": certificate.not_valid_after_utc.isoformat(),
+            "expired": now > certificate.not_valid_after_utc,
+            "not_yet_valid": now < certificate.not_valid_before_utc,
             "is_ca": TLSTrustStoreService._certificate_is_ca(certificate),
             "sha256_fingerprint": TLSTrustStoreService._format_digest(certificate.fingerprint(hashes.SHA256())),
             "sha1_fingerprint": TLSTrustStoreService._format_digest(certificate.fingerprint(hashes.SHA1())),

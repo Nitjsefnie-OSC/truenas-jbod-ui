@@ -144,6 +144,7 @@ from app.services.ssh_probe import (
 )
 from app.services.slot_detail_store import SlotDetailCacheEntry, SlotDetailStore
 from app.services.supermicro_bmc import BMCInventory, SupermicroBMCService
+from app.services.tls_context import certificate_verification_failure_reason
 from app.services.truenas_ws import (
     TrueNASAPIError,
     TrueNASRawData,
@@ -4486,8 +4487,15 @@ class InventoryService:
                 api_result = await api_task
             except Exception as exc:
                 logger.exception("Failed to fetch platform API data")
-                sources["api"] = SourceStatus(enabled=True, ok=False, message=str(exc))
-                warnings.append(f"{api_label} is unreachable. Slot details may be partial or unavailable.")
+                certificate_failure = certificate_verification_failure_reason(exc)
+                if certificate_failure is not None:
+                    # #954: name a failed certificate check instead of "unreachable".
+                    certificate_message = f"{api_label} certificate check failed: {certificate_failure}."
+                    sources["api"] = SourceStatus(enabled=True, ok=False, message=certificate_message)
+                    warnings.append(certificate_message)
+                else:
+                    sources["api"] = SourceStatus(enabled=True, ok=False, message=str(exc))
+                    warnings.append(f"{api_label} is unreachable. Slot details may be partial or unavailable.")
             else:
                 if api_result is not None:
                     raw_data = api_result

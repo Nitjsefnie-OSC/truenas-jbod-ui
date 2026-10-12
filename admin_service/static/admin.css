@@ -682,6 +682,15 @@ h3 {
   box-shadow: 0 0 0 3px rgba(113, 210, 255, 0.12);
 }
 
+.field input.needs-reentry {
+  border-color: var(--warning);
+  box-shadow: 0 0 0 3px rgba(255, 204, 115, 0.14);
+}
+
+.secret-reentry-note {
+  color: var(--warning);
+}
+
 .field input:disabled,
 .field select:disabled,
 .field textarea:disabled,
@@ -1676,6 +1685,11 @@ h3 {
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(120, 159, 196, 0.12);
   min-width: 0;
+}
+
+.tls-detail-list .tls-validity-warning strong,
+.tls-detail-list .tls-validity-warning span {
+  color: var(--warning);
 }
 
 .tls-detail-list div:last-child {
