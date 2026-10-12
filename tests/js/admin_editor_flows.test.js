@@ -644,7 +644,7 @@ test("deleting a storage view removes its saved view-order key", () => {
     viewOrder: ["enclosure:enc-a", "view:retired-view", "view:kept-view"],
   };
   const { deleteSelectedStorageView } = loadFunctions(
-    [deleteSource],
+    [deleteSource, sourceBetween("  function adoptGeneratedStorageViews(", "\n  function updateSelectedStorageView")],
     ["deleteSelectedStorageView"],
     { renderStorageViews: () => {}, state }
   );
@@ -805,12 +805,32 @@ test("deleting the generated Primary Chassis keeps it deleted on the next save",
 
   deleteSelectedStorageView();
 
+  // The other generated view the user kept is now a saved view, so the next
+  // load does not generate Primary Chassis again, and nothing pins a layout
+  // the user never chose.
   const payload = collectPayloadFor(state);
-  assert.equal(payload.auto_storage_views, false);
-  // The other generated view the user kept is now a saved view, and nothing
-  // pins a layout the user never chose.
   assert.deepEqual(payload.storage_views.map((view) => view.id), ["embedded-boot-media"]);
   assert.ok(payload.storage_views.every((view) => view.profile_id === null));
+});
+
+test("deleting the only generated view stores the no-generated-views marker", () => {
+  const deleteSource = sourceBetween(
+    "  function deleteSelectedStorageView() {",
+    "\n  function duplicateSelectedStorageView"
+  );
+  const state = generatedViewState();
+  state.storageViews = state.storageViews.filter((view) => view.id === "primary-chassis");
+  const { deleteSelectedStorageView } = loadFunctions(
+    [deleteSource, sourceBetween("  function adoptGeneratedStorageViews(", "\n  function updateSelectedStorageView")],
+    ["deleteSelectedStorageView"],
+    { renderStorageViews: () => {}, state }
+  );
+
+  deleteSelectedStorageView();
+
+  const payload = collectPayloadFor(state);
+  assert.deepEqual(payload.storage_views, []);
+  assert.equal(payload.auto_storage_views, false);
 });
 
 test("deleting every saved view keeps the system without generated views", () => {

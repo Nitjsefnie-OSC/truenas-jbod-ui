@@ -99,14 +99,17 @@ def resolve_system_storage_views(
 ) -> list[StorageViewConfig]:
     stored_views = list(system.storage_views)
     selected_profile_id = inferred_profile_id or (profile_registry.select_profile_id(system) if profile_registry else None)
-    if not stored_views and selected_profile_id:
+    if not stored_views and system.auto_storage_views and selected_profile_id:
+        # The generated chassis view carries no layout of its own: it draws
+        # whatever layout the system resolves to at render time, so a later
+        # Chassis layout choice still reaches it (#953).
         stored_views = [
             StorageViewConfig(
                 id="primary-chassis",
                 label="Primary Chassis",
                 kind="ses_enclosure",
                 template_id="ses-auto",
-                profile_id=selected_profile_id,
+                profile_id=None,
                 enabled=True,
                 order=10,
                 render=StorageViewRenderConfig(
@@ -128,6 +131,21 @@ def resolve_system_storage_views(
         stored_views,
         key=lambda item: (item.order, item.label.lower(), item.id),
     )
+
+
+def system_storage_views_are_generated(system: SystemConfig) -> bool:
+    """True when the views resolve_system_storage_views returns are generated, not saved."""
+    return not system.storage_views
+
+
+def storage_view_profile_is_pinned(
+    storage_view: StorageViewConfig,
+    profile_registry: "ProfileRegistry | None" = None,
+) -> bool:
+    """True when a chassis view draws its own saved layout instead of the system's."""
+    if storage_view.kind != "ses_enclosure" or not storage_view.profile_id:
+        return False
+    return profile_registry is None or profile_registry.get(storage_view.profile_id) is not None
 
 
 def resolve_storage_view_profile(

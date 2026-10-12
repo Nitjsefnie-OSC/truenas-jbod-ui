@@ -54,7 +54,7 @@ from app.services.release_status import ReleaseStatusService, describe_release_s
 from app.services.ssh_key_manager import SSHKeyManager
 from app.services.ssh_probe import SSHProbe
 from app.services.storage_view_templates import list_storage_view_templates
-from app.services.storage_views import resolve_system_storage_views
+from app.services.storage_views import resolve_system_storage_views, system_storage_views_are_generated
 from app.services.system_setup import (
     PRESERVE_SECRET_SENTINEL,
     SECRET_REUSE_MISMATCH_DETAIL,
@@ -745,6 +745,7 @@ def serialize_systems(settings: Settings) -> list[dict[str, Any]]:
             "bmc_verify_ssl": bool(system.bmc.verify_ssl),
             "bmc_timeout_seconds": system.bmc.timeout_seconds,
             "storage_views": serialize_storage_views(system, profile_registry),
+            "auto_storage_views": bool(system.auto_storage_views),
             "view_order": list(system.view_order),
         }
         for system in settings.systems
@@ -788,9 +789,13 @@ def serialize_system_ha_nodes(system: Any) -> list[dict[str, Any]]:
 
 def serialize_storage_views(system: Any, profile_registry: ProfileRegistry) -> list[dict[str, Any]]:
     stored_views = resolve_system_storage_views(system, profile_registry)
+    # Generated views are shown in the editor but are not saved until the user
+    # changes them, so a Save cannot pin a layout nobody chose (#953).
+    generated = system_storage_views_are_generated(system)
     return [
         {
             "id": storage_view.id,
+            "generated": generated,
             "label": storage_view.label,
             "kind": storage_view.kind,
             "template_id": storage_view.template_id,
