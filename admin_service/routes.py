@@ -114,6 +114,7 @@ from app.services.profile_builder import ProfileBuilderService
 from app.services.quantastor_api import QuantastorRESTClient
 from app.services.ssh_key_manager import SSHKeyManager
 from app.services.system_setup import _CONFIG_WRITE_LOCK, SystemSetupService
+from app.services.tls_context import host_uses_tls
 
 
 # History-summary scans allowed to hold worker threads at once, so a slow scan
@@ -787,6 +788,37 @@ def build_router(admin_settings: Any) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"ok": True, **trusted})
+
+    @router.get("/api/admin/tls/saved-status")
+    async def saved_tls_bundle_status(system_id: str = Query(..., max_length=128)) -> JSONResponse:
+        # #954: a reload re-checks the saved bundle so the admin can show the real
+        # failure (expired, name mismatch, unreachable) instead of "not validated
+        # yet". No probe runs when verification is off or no bundle is saved.
+        settings = reload_app_settings()
+        system = next((item for item in settings.systems if item.id == system_id), None)
+        if system is None:
+            raise HTTPException(status_code=404, detail="That system is not in the saved config.")
+        truenas = system.truenas
+        bundle_path = str(truenas.tls_ca_bundle_path or "").strip()
+        if not truenas.verify_ssl or not bundle_path or not host_uses_tls(str(truenas.host or "")):
+            return JSONResponse({"ok": True, "system_id": system.id, "validation": None})
+        trust_service = TLSTrustStoreService(settings.config_file)
+        try:
+            validation = await asyncio.to_thread(
+                trust_service.validate_bundle_for_host,
+                truenas.host,
+                bundle_path,
+                timeout_seconds=min(int(truenas.timeout_seconds or 10), 10),
+                tls_server_name=truenas.tls_server_name,
+            )
+        except ValueError as exc:
+            validation = {
+                "validated": False,
+                "host": truenas.host,
+                "bundle_path": bundle_path,
+                "detail": str(exc),
+            }
+        return JSONResponse({"ok": True, "system_id": system.id, "validation": validation})
 
     @router.post("/api/admin/system-setup/quantastor-nodes")
     async def discover_quantastor_nodes(payload: QuantastorNodeDiscoveryRequest) -> JSONResponse:

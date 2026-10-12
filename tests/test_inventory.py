@@ -1334,6 +1334,66 @@ class InventoryOverlayStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bundle.sources["ssh"].ok)
 
 
+class InventoryApiCertificateFailureTests(unittest.IsolatedAsyncioTestCase):
+    """#954: a failed certificate check is named as one, not as an unreachable API."""
+
+    async def _bundle(self, error, platform="core"):
+        import ssl  # noqa: F401
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        system = SystemConfig(
+            id="synthetic-tls",
+            truenas=TrueNASConfig(platform=platform, host="https://truenas.example.test", verify_ssl=True),
+            ssh=SSHConfig(enabled=False),
+        )
+        api = AsyncMock()
+        api.fetch_all.side_effect = error
+        service = build_inventory_service(Settings(), system, api, AsyncMock(), directory.name)
+        with patch("app.services.inventory.logger.exception"):
+            return await service._collect_inventory_source_bundle()
+
+    @staticmethod
+    def _expired_error():
+        import ssl
+
+        error = ssl.SSLCertVerificationError(
+            1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: certificate has expired (_ssl.c:1000)"
+        )
+        error.verify_code = 10
+        error.verify_message = "certificate has expired"
+        return error
+
+    async def test_websocket_certificate_failure_is_named(self):
+        bundle = await self._bundle(self._expired_error())
+
+        self.assertFalse(bundle.sources["api"].ok)
+        self.assertIn("TrueNAS API certificate check failed: certificate has expired.", bundle.warnings)
+        self.assertFalse(any("unreachable" in warning for warning in bundle.warnings), bundle.warnings)
+        self.assertIn("certificate check failed", bundle.sources["api"].message)
+
+    async def test_wrapped_certificate_failure_is_found_in_the_exception_chain(self):
+        from urllib.error import URLError
+
+        try:
+            try:
+                raise URLError(self._expired_error())
+            except URLError as exc:
+                raise TrueNASAPIError("Quantastor API request to storageSystemEnum failed: synthetic") from exc
+        except TrueNASAPIError as wrapped:
+            error = wrapped
+
+        bundle = await self._bundle(error, platform="quantastor")
+
+        self.assertIn("Quantastor API certificate check failed: certificate has expired.", bundle.warnings)
+
+    async def test_other_connection_failures_still_say_unreachable(self):
+        bundle = await self._bundle(ConnectionRefusedError("synthetic refusal"))
+
+        self.assertIn("TrueNAS API is unreachable. Slot details may be partial or unavailable.", bundle.warnings)
+        self.assertEqual(bundle.sources["api"].message, "synthetic refusal")
+
+
 class InventorySSHRequiredCommandTests(unittest.IsolatedAsyncioTestCase):
     """#927: `sources.ssh.required_ok` separates a failed bay-map command from failed enrichment."""
 

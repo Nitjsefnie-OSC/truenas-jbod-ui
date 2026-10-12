@@ -399,6 +399,88 @@ class TLSCertificateValidityWindowTests(unittest.TestCase):
         create_connection.assert_not_called()
 
 
+class SavedTLSBundleStatusRouteTests(unittest.TestCase):
+    """#954: admin re-checks a saved bundle on load and returns the real failure reason."""
+
+    def setUp(self) -> None:
+        import tests.admin_test_env  # noqa: F401  (must precede admin_service.main)
+        from admin_service.main import app as admin_app
+
+        self.route = next(
+            route for route in admin_app.routes if getattr(route, "path", None) == "/api/admin/tls/saved-status"
+        )
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.bundle_path = self.temp_dir / "tls" / "synthetic-core.pem"
+        self.bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        self.bundle_path.write_text(build_self_signed_pem("truenas.example.test"), encoding="utf-8")
+
+    def _settings(self, **truenas: object):
+        from app.config import Settings, SystemConfig
+
+        values = {
+            "host": "https://truenas.example.test",
+            "verify_ssl": True,
+            "tls_ca_bundle_path": str(self.bundle_path),
+            "tls_server_name": None,
+            **truenas,
+        }
+        return Settings(
+            config_file=str(self.temp_dir / "config.yaml"),
+            systems=[SystemConfig(id="synthetic-core", truenas=TrueNASConfig(**values))],
+        )
+
+    def _call(self, settings, system_id: str = "synthetic-core") -> dict:
+        import asyncio
+        import json
+
+        with patch("admin_service.routes.reload_app_settings", return_value=settings):
+            response = asyncio.run(self.route.endpoint(system_id=system_id))
+        return json.loads(response.body)
+
+    def test_saved_bundle_is_revalidated_and_the_failure_reason_is_returned(self) -> None:
+        failure = {
+            "validated": False,
+            "host": "https://truenas.example.test",
+            "bundle_path": str(self.bundle_path),
+            "detail": "TLS verification failed with the saved bundle: certificate has expired",
+        }
+        with patch.object(TLSTrustStoreService, "validate_bundle_for_host", return_value=failure) as validate:
+            payload = self._call(self._settings(tls_server_name="truenas.example.test"))
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["system_id"], "synthetic-core")
+        self.assertEqual(payload["validation"], failure)
+        validate.assert_called_once()
+        args, kwargs = validate.call_args
+        self.assertEqual(args, ("https://truenas.example.test", str(self.bundle_path)))
+        self.assertEqual(kwargs["tls_server_name"], "truenas.example.test")
+        self.assertLessEqual(kwargs["timeout_seconds"], 10)
+
+    def test_no_probe_when_verification_is_off_or_no_bundle_is_saved(self) -> None:
+        for overrides in ({"verify_ssl": False}, {"tls_ca_bundle_path": None}, {"host": "http://truenas.example.test"}):
+            with self.subTest(overrides=overrides):
+                with patch.object(TLSTrustStoreService, "validate_bundle_for_host") as validate:
+                    payload = self._call(self._settings(**overrides))
+                self.assertTrue(payload["ok"])
+                self.assertIsNone(payload["validation"])
+                validate.assert_not_called()
+
+    def test_missing_saved_bundle_is_reported_as_a_failed_check(self) -> None:
+        missing = self.temp_dir / "tls" / "absent.pem"
+
+        payload = self._call(self._settings(tls_ca_bundle_path=str(missing)))
+
+        self.assertFalse(payload["validation"]["validated"])
+        self.assertIn("could not be found", payload["validation"]["detail"])
+
+    def test_unknown_system_is_a_404(self) -> None:
+        from fastapi import HTTPException
+
+        with self.assertRaises(HTTPException) as raised:
+            self._call(self._settings(), system_id="not-saved")
+        self.assertEqual(raised.exception.status_code, 404)
+
+
 class TLSContextTests(unittest.TestCase):
     def test_resolve_tls_server_name_prefers_override(self) -> None:
         server_name = resolve_tls_server_name(
