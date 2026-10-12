@@ -7668,6 +7668,105 @@ class SecretWhitespaceModelTests(unittest.TestCase):
 
 
 class SystemSetupServiceTests(unittest.TestCase):
+    @staticmethod
+    def _primary_chassis_request(**overrides: Any) -> SystemSetupRequest:
+        fields: dict[str, Any] = {
+            "system_id": "fresh-core",
+            "label": "Fresh CORE",
+            "platform": "core",
+            "truenas_host": "https://core.example.test",
+        }
+        fields.update(overrides)
+        return SystemSetupRequest(**fields)
+
+    @staticmethod
+    def _saved_system(config_path: Path) -> dict[str, Any]:
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        return saved["systems"][0]
+
+    def test_untouched_generated_primary_chassis_is_not_pinned_and_follows_the_layout(self) -> None:
+        # #953: the editor sends no storage views while the generated Primary
+        # Chassis is untouched, so config.yaml gains no pinned layout and a
+        # later Chassis layout choice reaches the generated view.
+        from admin_service.route_support import serialize_storage_views
+        from app.config import SystemConfig
+        from app.services.profile_registry import ProfileRegistry
+
+        temp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, temp_dir, True)
+        config_path = temp_dir / "config.yaml"
+        write_yaml(config_path, {})
+        service = SystemSetupService(str(config_path))
+        registry = ProfileRegistry(Settings())
+
+        service.create_system(self._primary_chassis_request(storage_views=[]))
+        saved = self._saved_system(config_path)
+        self.assertEqual(saved.get("storage_views") or [], [])
+        views = serialize_storage_views(SystemConfig.model_validate(saved), registry)
+        self.assertEqual([view["id"] for view in views], ["primary-chassis"])
+        self.assertIsNone(views[0]["profile_id"])
+        self.assertTrue(views[0]["generated"])
+
+        service.save_system(
+            self._primary_chassis_request(
+                default_profile_id="supermicro-ssg-6048r-front-24",
+                storage_views=[],
+                replace_existing=True,
+            )
+        )
+        saved = self._saved_system(config_path)
+        self.assertEqual(saved.get("storage_views") or [], [])
+        self.assertEqual(saved["default_profile_id"], "supermicro-ssg-6048r-front-24")
+        views = serialize_storage_views(SystemConfig.model_validate(saved), registry)
+        self.assertIsNone(views[0]["profile_id"])
+
+    def test_deleted_primary_chassis_stays_deleted_after_reload_and_save(self) -> None:
+        from admin_service.route_support import serialize_storage_views
+        from app.config import SystemConfig
+        from app.services.profile_registry import ProfileRegistry
+
+        temp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, temp_dir, True)
+        config_path = temp_dir / "config.yaml"
+        write_yaml(config_path, {})
+        service = SystemSetupService(str(config_path))
+        registry = ProfileRegistry(Settings())
+
+        service.create_system(self._primary_chassis_request(storage_views=[], auto_storage_views=False))
+        saved = self._saved_system(config_path)
+        self.assertIs(saved["auto_storage_views"], False)
+        self.assertEqual(serialize_storage_views(SystemConfig.model_validate(saved), registry), [])
+
+        # A later save that does not mention the marker keeps it.
+        service.save_system(self._primary_chassis_request(storage_views=[], replace_existing=True))
+        saved = self._saved_system(config_path)
+        self.assertIs(saved["auto_storage_views"], False)
+        self.assertEqual(serialize_storage_views(SystemConfig.model_validate(saved), registry), [])
+
+    def test_intentionally_pinned_primary_chassis_is_kept(self) -> None:
+        temp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, temp_dir, True)
+        config_path = temp_dir / "config.yaml"
+        write_yaml(config_path, {})
+        service = SystemSetupService(str(config_path))
+        pinned_view = {
+            "id": "primary-chassis",
+            "label": "Primary Chassis",
+            "kind": "ses_enclosure",
+            "template_id": "ses-auto",
+            "profile_id": "supermicro-ssg-6048r-front-24",
+            "binding": {"mode": "auto"},
+        }
+
+        service.create_system(self._primary_chassis_request(storage_views=[pinned_view]))
+        service.save_system(self._primary_chassis_request(replace_existing=True))
+
+        saved = self._saved_system(config_path)
+        self.assertEqual(
+            [(view["id"], view["profile_id"]) for view in saved["storage_views"]],
+            [("primary-chassis", "supermicro-ssg-6048r-front-24")],
+        )
+
     def test_create_system_persists_normalized_view_order(self) -> None:
         temp_dir = Path(tempfile.mkdtemp())
         config_path = temp_dir / "config.yaml"

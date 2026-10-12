@@ -644,7 +644,7 @@ test("deleting a storage view removes its saved view-order key", () => {
     viewOrder: ["enclosure:enc-a", "view:retired-view", "view:kept-view"],
   };
   const { deleteSelectedStorageView } = loadFunctions(
-    [deleteSource],
+    [deleteSource, sourceBetween("  function adoptGeneratedStorageViews(", "\n  function updateSelectedStorageView")],
     ["deleteSelectedStorageView"],
     { renderStorageViews: () => {}, state }
   );
@@ -694,4 +694,218 @@ test("ESXi host prep uses canonical preserved secrets and configured timeout", (
   assert.equal(payload.system_id, "saved-esxi");
   assert.equal(payload.password, PRESERVE_SECRET_SENTINEL);
   assert.equal(payload.timeout_seconds, 240);
+});
+
+// #953: the Primary Chassis that admin generates for a system with no saved
+// views is shown in the editor but is not the user's choice. It must not be
+// saved, with its layout pinned, until the user changes the views.
+function generatedViewState() {
+  return {
+    selectedStorageViewId: "primary-chassis",
+    autoStorageViews: true,
+    storageViews: [
+      { id: "primary-chassis", label: "Primary Chassis", kind: "ses_enclosure", template_id: "ses-auto",
+        profile_id: "", order: 10, enabled: true, generated: true,
+        render: { show_in_main_ui: true, show_in_admin_ui: true, default_collapsed: false },
+        binding: { mode: "auto" } },
+      { id: "embedded-boot-media", label: "Embedded Boot Media", kind: "boot_devices",
+        template_id: "embedded-boot-media-1", profile_id: "", order: 30, enabled: true, generated: true,
+        render: { show_in_main_ui: true, show_in_admin_ui: true, default_collapsed: true },
+        binding: { mode: "auto", device_names: ["boot"] } },
+    ],
+    viewOrder: [],
+  };
+}
+
+function collectPayloadFor(state) {
+  const collectSecretSource = sourceBetween(
+    "  function collectSecretField",
+    "\n  function renderHistoryMaintenance"
+  );
+  const collectSetupSource = sourceBetween(
+    "  function collectSetupPayload",
+    "\n  async function discoverQuantastorHaNodes"
+  );
+  const elements = sparseElements({
+    setupPlatform: { value: "core" },
+    setupSystemId: { value: "fresh-core" },
+    setupSystemLabel: { value: "Fresh CORE" },
+    setupTruenasHost: { value: "https://core.example.test" },
+    setupSshEnabled: { checked: false },
+    setupSshKeyMode: { value: "none" },
+  });
+  const { collectSetupPayload } = loadFunctions(
+    [collectSecretSource, collectSetupSource],
+    ["collectSetupPayload"],
+    {
+      PRESERVE_SECRET_SENTINEL,
+      collectSshCommandUpdate: () => ({ ssh_commands: [], ssh_commands_action: "default" }),
+      collectTlsServerName: () => null,
+      currentQuantastorHaNodes: () => [],
+      currentSetupPlatform: () => "core",
+      elements,
+      getSystemById: () => null,
+      isEditingLoadedSystem: () => false,
+      normalizeConnectionHost: (value) => String(value || "").trim(),
+      normalizeKeyMode: (value) => value,
+      platformSupportsSavedSudo: () => false,
+      recommendedSshUserForPlatform: () => "root",
+      savedSecretConfigured: () => false,
+      setupPlatformUsesBmcOnlyHost: () => false,
+      setupPlatformUsesSshOnlyHost: () => false,
+      state,
+    }
+  );
+  return JSON.parse(JSON.stringify(collectSetupPayload()));
+}
+
+test("saving an untouched generated Primary Chassis sends no storage views", () => {
+  const payload = collectPayloadFor(generatedViewState());
+
+  assert.deepEqual(payload.storage_views, []);
+  assert.equal(payload.auto_storage_views, true);
+});
+
+test("normalizing a storage view keeps the generated marker", () => {
+  const normalizeSource = sourceBetween(
+    "  function normalizeStorageView(",
+    "\n  function createStorageViewFromTemplate"
+  );
+  const { normalizeStorageViews } = loadFunctions(
+    [normalizeSource],
+    ["normalizeStorageViews"],
+    {
+      getStorageViewTemplate: () => null,
+      normalizeSlotLabelMap: () => ({}),
+      normalizeSlotSizeMap: () => ({}),
+      slugify: (value) => String(value),
+      state: { storageViewTemplates: [] },
+    }
+  );
+
+  const [generated, saved] = normalizeStorageViews([
+    { id: "primary-chassis", label: "Primary Chassis", kind: "ses_enclosure", template_id: "ses-auto", generated: true, order: 10 },
+    { id: "front", label: "Front", kind: "ses_enclosure", template_id: "ses-auto", order: 20 },
+  ]);
+  assert.equal(generated.generated, true);
+  assert.equal(saved.generated, false);
+});
+
+test("deleting the generated Primary Chassis keeps it deleted on the next save", () => {
+  const deleteSource = sourceBetween(
+    "  function deleteSelectedStorageView() {",
+    "\n  function duplicateSelectedStorageView"
+  );
+  const state = generatedViewState();
+  const { deleteSelectedStorageView } = loadFunctions(
+    [deleteSource, sourceBetween("  function adoptGeneratedStorageViews(", "\n  function updateSelectedStorageView")],
+    ["deleteSelectedStorageView"],
+    { renderStorageViews: () => {}, state }
+  );
+
+  deleteSelectedStorageView();
+
+  // The other generated view the user kept is now a saved view, so the next
+  // load does not generate Primary Chassis again, and nothing pins a layout
+  // the user never chose.
+  const payload = collectPayloadFor(state);
+  assert.deepEqual(payload.storage_views.map((view) => view.id), ["embedded-boot-media"]);
+  assert.ok(payload.storage_views.every((view) => view.profile_id === null));
+});
+
+test("deleting the only generated view stores the no-generated-views marker", () => {
+  const deleteSource = sourceBetween(
+    "  function deleteSelectedStorageView() {",
+    "\n  function duplicateSelectedStorageView"
+  );
+  const state = generatedViewState();
+  state.storageViews = state.storageViews.filter((view) => view.id === "primary-chassis");
+  const { deleteSelectedStorageView } = loadFunctions(
+    [deleteSource, sourceBetween("  function adoptGeneratedStorageViews(", "\n  function updateSelectedStorageView")],
+    ["deleteSelectedStorageView"],
+    { renderStorageViews: () => {}, state }
+  );
+
+  deleteSelectedStorageView();
+
+  const payload = collectPayloadFor(state);
+  assert.deepEqual(payload.storage_views, []);
+  assert.equal(payload.auto_storage_views, false);
+});
+
+test("deleting every saved view keeps the system without generated views", () => {
+  const deleteSource = sourceBetween(
+    "  function deleteSelectedStorageView() {",
+    "\n  function duplicateSelectedStorageView"
+  );
+  const state = {
+    selectedStorageViewId: "primary-chassis",
+    autoStorageViews: true,
+    storageViews: [
+      { id: "primary-chassis", label: "Primary Chassis", kind: "ses_enclosure", template_id: "ses-auto",
+        profile_id: "supermicro-ssg-6048r-front-24", order: 10, enabled: true, generated: false },
+    ],
+    viewOrder: [],
+  };
+  const { deleteSelectedStorageView } = loadFunctions(
+    [deleteSource, sourceBetween("  function adoptGeneratedStorageViews(", "\n  function updateSelectedStorageView")],
+    ["deleteSelectedStorageView"],
+    { renderStorageViews: () => {}, state }
+  );
+
+  deleteSelectedStorageView();
+
+  assert.equal(collectPayloadFor(state).auto_storage_views, false);
+});
+
+test("editing a generated view saves the generated views without a pinned layout", () => {
+  const updateSource = sourceBetween(
+    "  function adoptGeneratedStorageViews(",
+    "\n  function saveStorageViewEditorToState"
+  );
+  const state = generatedViewState();
+  const { updateSelectedStorageView } = loadFunctions(
+    [updateSource],
+    ["updateSelectedStorageView"],
+    {
+      getSelectedStorageView: () => state.storageViews.find((view) => view.id === state.selectedStorageViewId),
+      normalizeStorageViews: (views) => views,
+      renderStorageViews: () => {},
+      state,
+    }
+  );
+
+  updateSelectedStorageView((view) => {
+    view.label = "Front Shelf";
+  });
+
+  const payload = collectPayloadFor(state);
+  assert.deepEqual(payload.storage_views.map((view) => view.id), ["primary-chassis", "embedded-boot-media"]);
+  assert.equal(payload.storage_views[0].label, "Front Shelf");
+  assert.equal(payload.storage_views[0].profile_id, null);
+});
+
+test("loading a system restores its generated-view setting", () => {
+  const loadSource = sourceBetween(
+    "  function loadSystemIntoForm(system) {",
+    "\n    if (elements.setupSystemLabel) {"
+  );
+  const state = {};
+  const { loadSystemIntoForm } = loadFunctions(
+    [`${loadSource}\n  }`],
+    ["loadSystemIntoForm"],
+    {
+      normalizeHaNodes: (nodes) => nodes,
+      replaceStorageViewState: (views) => {
+        state.storageViews = views;
+      },
+      retireAdminEditorControls: () => {},
+      state,
+    }
+  );
+
+  loadSystemIntoForm({ id: "emptied-core", storage_views: [], auto_storage_views: false });
+  assert.equal(state.autoStorageViews, false);
+  loadSystemIntoForm({ id: "fresh-core", storage_views: [] });
+  assert.equal(state.autoStorageViews, true);
 });

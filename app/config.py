@@ -524,6 +524,10 @@ class SystemConfig(BaseModel):
     default_profile_id: str | None = None
     enclosure_profiles: dict[str, str] = Field(default_factory=dict)
     storage_views: list[StorageViewConfig] = Field(default_factory=list)
+    # With no saved storage views, the app shows a generated Primary Chassis
+    # (plus any platform extras) that follows the system's chassis layout.
+    # False means the user deleted those views; none are generated (#953).
+    auto_storage_views: bool = True
     view_order: list[str] = Field(default_factory=list)
 
     @field_validator("view_order", mode="before")

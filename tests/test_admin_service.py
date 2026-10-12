@@ -3341,8 +3341,75 @@ class AdminStatePayloadTests(unittest.TestCase):
         self.assertEqual(inferred_view["id"], "primary-chassis")
         self.assertEqual(inferred_view["template_id"], "ses-auto")
         self.assertEqual(inferred_view["kind"], "ses_enclosure")
-        self.assertEqual(inferred_view["profile_id"], "supermicro-cse-946-top-60")
+        # #953: the generated view follows the system's layout instead of
+        # carrying the registry's pick, so a Save cannot pin it.
+        self.assertIsNone(inferred_view["profile_id"])
+        self.assertTrue(inferred_view["generated"])
         self.assertTrue(inferred_view["render"]["show_in_main_ui"])
+
+    @staticmethod
+    def _admin_systems_for(settings: Settings) -> list[dict[str, Any]]:
+        runtime_service = MagicMock()
+        runtime_service.status_payload.return_value = {"available": True, "detail": None, "containers": []}
+        key_manager = MagicMock()
+        key_manager.list_keys.return_value = []
+        with patch("admin_service.route_support.reload_app_settings", return_value=settings):
+            with patch("admin_service.route_support.get_runtime_service", return_value=runtime_service):
+                with patch("admin_service.route_support.SSHKeyManager", return_value=key_manager):
+                    with patch("admin_service.route_support.get_admin_settings", return_value=AdminSettings()):
+                        with patch(
+                            "admin_service.route_support.get_history_settings",
+                            return_value=HistorySettings(sqlite_path="/tmp/history/history.db"),
+                        ):
+                            payload = asyncio.run(build_admin_state_payload(make_request(port=8082)))
+        return payload["systems"]
+
+    def test_admin_state_keeps_an_intentionally_pinned_primary_chassis(self) -> None:
+        settings = Settings(
+            systems=[
+                SystemConfig(
+                    id="pinned-core",
+                    label="Pinned CORE",
+                    truenas=TrueNASConfig(host="https://core.example.test", platform="core"),
+                    storage_views=[
+                        {
+                            "id": "primary-chassis",
+                            "label": "Primary Chassis",
+                            "kind": "ses_enclosure",
+                            "template_id": "ses-auto",
+                            "profile_id": "supermicro-ssg-6048r-front-24",
+                            "binding": {"mode": "auto"},
+                        }
+                    ],
+                )
+            ],
+            default_system_id="pinned-core",
+        )
+
+        system = self._admin_systems_for(settings)[0]
+
+        view = system["storage_views"][0]
+        self.assertEqual(view["profile_id"], "supermicro-ssg-6048r-front-24")
+        self.assertFalse(view["generated"])
+        self.assertTrue(system["auto_storage_views"])
+
+    def test_admin_state_leaves_a_deleted_primary_chassis_deleted(self) -> None:
+        settings = Settings(
+            systems=[
+                SystemConfig(
+                    id="emptied-core",
+                    label="Emptied CORE",
+                    truenas=TrueNASConfig(host="https://core.example.test", platform="core"),
+                    auto_storage_views=False,
+                )
+            ],
+            default_system_id="emptied-core",
+        )
+
+        system = self._admin_systems_for(settings)[0]
+
+        self.assertEqual(system["storage_views"], [])
+        self.assertFalse(system["auto_storage_views"])
 
     def test_build_admin_state_payload_infers_unifi_embedded_boot_media_view(self) -> None:
         settings = Settings(

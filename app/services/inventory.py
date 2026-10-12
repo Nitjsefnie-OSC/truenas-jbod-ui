@@ -77,6 +77,7 @@ from app.services.storage_views import (
     ordered_storage_view_slot_indices,
     resolve_storage_view_profile,
     resolve_system_storage_views,
+    storage_view_profile_is_pinned,
     storage_view_slot_label,
     storage_view_slot_size,
 )
@@ -3262,6 +3263,7 @@ class InventoryService:
             template_label=template.label if template else storage_view.template_id,
             slot_layout=layout_rows,
             source="selected_enclosure_snapshot",
+            profile_pinned=storage_view_profile_is_pinned(storage_view, self.profile_registry),
             backing_enclosure_id=snapshot.selected_enclosure_id,
             backing_enclosure_label=snapshot.selected_enclosure_label,
             notes=notes,

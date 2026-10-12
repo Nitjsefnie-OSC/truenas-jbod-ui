@@ -175,6 +175,15 @@ If a live enclosure already auto-populates for the loaded system, the add list
 hides the duplicate saved chassis option so the admin UI does not encourage
 live-versus-saved clones.
 
+A system with no saved views shows a generated **Primary Chassis** that uses
+the system's **Chassis layout**. Saving without changing the storage views
+leaves it unsaved, so a later layout change still reaches it. Editing, adding,
+reordering or deleting a view saves the remaining views, still without a pinned
+layout unless you pick one. Deleting every view stores
+`auto_storage_views: false`, and Primary Chassis is not generated again. The
+main page labels a chassis view without its own layout **Chassis** and one
+with a pinned layout **Saved view**.
+
 ### SSH key and runtime commands
 
 Use the SSH section when you want to:

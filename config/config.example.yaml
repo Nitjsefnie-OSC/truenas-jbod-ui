@@ -192,6 +192,10 @@ admin:
 #     # shown in admin under the system's enclosures.
 #     enclosure_profiles:
 #       "<enclosure-id-from-admin>": supermicro-cse-946-top-60
+#     # With no storage views, the app shows a generated Primary Chassis that
+#     # follows this system's chassis layout. false keeps a system whose views
+#     # were all deleted without one. Default: true.
+#     auto_storage_views: true
 #     # Optional flat main-page order. Entries not listed are appended using the
 #     # occupied-disk fallback; stale ids are ignored. An empty list is automatic.
 #     view_order:

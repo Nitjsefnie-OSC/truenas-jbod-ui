@@ -553,6 +553,11 @@ class SystemSetupService:
                 default_profile_id=payload.default_profile_id,
                 enclosure_profiles=dict(existing_system.enclosure_profiles) if existing_system else {},
                 storage_views=storage_views,
+                auto_storage_views=(
+                    payload.auto_storage_views
+                    if payload.auto_storage_views is not None
+                    else (existing_system.auto_storage_views if existing_system else True)
+                ),
                 view_order=list(
                     payload.view_order
                     if payload.view_order is not None
@@ -643,10 +648,14 @@ class SystemSetupService:
                 ),
             )
 
+            raw_system = system.model_dump(mode="python", exclude_none=True)
+            if system.auto_storage_views:
+                # Only the non-default value is written to config.yaml.
+                raw_system.pop("auto_storage_views", None)
             if existing_index is None:
-                raw_systems.append(system.model_dump(mode="python", exclude_none=True))
+                raw_systems.append(raw_system)
             else:
-                raw_systems[existing_index] = system.model_dump(mode="python", exclude_none=True)
+                raw_systems[existing_index] = raw_system
             config["systems"] = raw_systems
             if payload.make_default or not normalize_text(str(config.get("default_system_id") or "")):
                 config["default_system_id"] = system_id

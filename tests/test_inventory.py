@@ -3967,6 +3967,68 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
             quantastor_ses_data=ParsedSSHData(),
         )
 
+    def _primary_chassis_runtime(self, system: SystemConfig, profile_id: str):
+        options = [EnclosureOption(id="enc-a", label="Enclosure A")]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
+            snapshot = self._view_order_snapshot(
+                system.id, "enc-a", "Enclosure A", 2, options,
+                selected_profile=service.profile_registry.get(profile_id),
+            )
+            service.get_snapshot = AsyncMock(return_value=snapshot)
+            service._get_inventory_source_bundle = AsyncMock(return_value=self._empty_source_bundle())
+            runtime = asyncio.run(service.get_storage_view_runtime())
+        return next(view for view in runtime.views if view.id == "primary-chassis")
+
+    def test_unpinned_primary_chassis_follows_the_system_layout(self) -> None:
+        # #953: the generated Primary Chassis, and one saved without a layout
+        # of its own, draw whatever layout the system resolves to and are not
+        # reported as pinned, so the main page labels them "Chassis".
+        unpinned_saved = {
+            "id": "primary-chassis",
+            "label": "Primary Chassis",
+            "kind": "ses_enclosure",
+            "template_id": "ses-auto",
+            "profile_id": None,
+            "binding": {"mode": "auto"},
+        }
+        for storage_views in ([], [unpinned_saved]):
+            for profile_id in (CORE_CSE_946_PROFILE_ID, SCALE_SSG_FRONT_24_PROFILE_ID):
+                with self.subTest(saved=bool(storage_views), profile_id=profile_id):
+                    system = SystemConfig(
+                        id="synthetic-core",
+                        label="Synthetic CORE",
+                        default_profile_id=profile_id,
+                        truenas=TrueNASConfig(platform="core"),
+                        storage_views=storage_views,
+                    )
+                    view = self._primary_chassis_runtime(system, profile_id)
+                    self.assertEqual(view.profile_id, profile_id)
+                    self.assertIs(view.profile_pinned, False)
+
+    def test_pinned_primary_chassis_keeps_its_layout_and_is_reported_pinned(self) -> None:
+        system = SystemConfig(
+            id="synthetic-core",
+            label="Synthetic CORE",
+            default_profile_id=CORE_CSE_946_PROFILE_ID,
+            truenas=TrueNASConfig(platform="core"),
+            storage_views=[
+                {
+                    "id": "primary-chassis",
+                    "label": "Primary Chassis",
+                    "kind": "ses_enclosure",
+                    "template_id": "ses-auto",
+                    "profile_id": SCALE_SSG_FRONT_24_PROFILE_ID,
+                    "binding": {"mode": "auto"},
+                }
+            ],
+        )
+
+        view = self._primary_chassis_runtime(system, CORE_CSE_946_PROFILE_ID)
+
+        self.assertEqual(view.profile_id, SCALE_SSG_FRONT_24_PROFILE_ID)
+        self.assertIs(view.profile_pinned, True)
+
     def test_storage_view_runtime_ranks_all_enclosures_without_another_source_fetch(self) -> None:
         options = [
             EnclosureOption(id="enc-a", label="Enclosure A"),
