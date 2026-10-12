@@ -40,6 +40,7 @@ from app.services.parsers import (
     parse_smartctl_summary,
     parse_storcli_physical_drives,
     parse_unifi_gpio_debug,
+    parse_zpool_pool_states,
     parse_zpool_status,
 )
 
@@ -177,6 +178,37 @@ scbus13 on mpr1 bus 0:
                 self.assertEqual(parsed[key].vdev_name, "spares")
                 self.assertEqual(parsed[key].topology_label, "tank > spares > spare")
         self.assertEqual(parsed["gptid/data-a"].vdev_name, "raidz2-0")
+
+    def test_parse_zpool_pool_states_reads_each_pool_state_line(self) -> None:
+        output = """
+  pool: boot-pool
+ state: ONLINE
+config:
+
+        NAME          STATE     READ WRITE CKSUM
+        boot-pool     ONLINE       0     0     0
+          ada0p2      ONLINE       0     0     0
+
+errors: No known data errors
+
+  pool: flashpool
+ state: DEGRADED
+status: One or more devices has experienced an unrecoverable error.
+config:
+
+        NAME          STATE     READ WRITE CKSUM
+        flashpool     DEGRADED     0     0     0
+          mirror-0    DEGRADED     0     0     0
+            nvd0p2    FAULTED      0     0     0  too many errors
+            nvd1p2    ONLINE       0     0     0
+
+errors: No known data errors
+""".strip()
+
+        self.assertEqual(parse_zpool_pool_states(output), {"boot-pool": "ONLINE", "flashpool": "DEGRADED"})
+        self.assertEqual(parse_zpool_pool_states("no pools available"), {})
+        parsed = parse_ssh_outputs({"/usr/local/sbin/zpool status -LP": output}, 60, None)
+        self.assertEqual(parsed.zpool_pool_states, {"boot-pool": "ONLINE", "flashpool": "DEGRADED"})
 
     def test_parse_zpool_status_groups_spares_by_pool(self) -> None:
         output = """

@@ -6172,6 +6172,7 @@
       slot.serial ? `Serial: ${slot.serial}` : "Serial: n/a",
       persistentIdText,
       slot.pool_name ? `Pool: ${slot.pool_name}` : "Pool: n/a",
+      slot.vdev_name ? `Vdev: ${slot.vdev_name}` : null,
       slot.health ? `Health: ${formatSlotHealth(slot.health)}` : null,
       slot.target_system_label ? `Target: ${slot.target_system_label}` : null,
       slot.placement_key ? `Placement: ${slot.placement_key}` : null,
@@ -9113,6 +9114,7 @@
         kvRowIfMeaningful("Namespace EUI64", formatNamespaceEui64Value(storageViewSlot, smartEntry), true),
         kvRowIfMeaningful("Namespace NGUID", formatNamespaceNguidValue(smartEntry), true),
         kvRowIfMeaningful("Pool", storageViewSlot.pool_name),
+        kvRowIfMeaningful("Vdev", storageViewSlot.vdev_name),
         kvRowIfMeaningful(
           state.snapshotMode ? "Health at capture" : "Health",
           formatSlotHealth(storageViewSlot.health),

@@ -39,6 +39,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 - CORE SSH stopped stacking separate backplanes and AHCI SGPIO ports into one
   shelf drawn as the 60-bay CSE-946, and read pool names without the API
   (#955).
+- A storage-view disk whose pool member was DEGRADED or FAULTED was drawn
+  Fault instead of Healthy, and a TrueNAS pool that was not ONLINE was named
+  in the page warnings (#956).
 
 ## v0.24.0-beta.3 - 2026-10-11
 
