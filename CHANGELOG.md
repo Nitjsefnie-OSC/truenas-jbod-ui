@@ -67,6 +67,10 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   saved bundle's real failure after a reload and marks the API key for
   re-entry when TLS settings change, and the main page names a failed
   certificate check instead of calling the API unreachable (#965).
+- Admin's Add a view listed the AOC-SLG4-2H8M2 card and FatTwin Rear 2 twice,
+  and the system Chassis layout list offered them; each is now listed once, a
+  system saved with one keeps it, the drive list heading matches its drives,
+  and NVMe drives no longer start with "UNKNOWN" (#966).
 
 ## v0.24.0-beta.3 - 2026-10-11
 

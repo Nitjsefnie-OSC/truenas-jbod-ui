@@ -48,7 +48,7 @@ from app.models.domain import (
 )
 from app.services.inventory import InventoryService
 from app.services.profile_builder import collect_profile_references
-from app.services.profile_registry import ProfileRegistry, build_profile_reference_warnings
+from app.services.profile_registry import ProfileRegistry, build_profile_reference_warnings, profile_is_system_layout
 from app.services.quantastor_cli import build_quantastor_cli_invocation
 from app.services.release_status import ReleaseStatusService, describe_release_status
 from app.services.ssh_key_manager import SSHKeyManager
@@ -839,6 +839,7 @@ def serialize_profiles(settings: Settings) -> list[dict[str, Any]]:
                 "is_custom": is_custom,
                 "source": "custom" if is_custom else "built-in",
                 "reference_count": int(references.get("count", 0) or 0),
+                "system_layout": profile_is_system_layout(profile),
             }
         )
     return profiles

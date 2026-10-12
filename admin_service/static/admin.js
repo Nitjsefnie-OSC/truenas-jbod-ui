@@ -1912,8 +1912,19 @@
       return;
     }
     const selectedValue = elements.setupProfile.value || state.selectedProfileId || "";
+    // Chassis and shelf faces only; an M.2 card or a rear 2-bay group is added
+    // in step 4 as a storage view (#952).
+    const listedProfiles = state.profiles.filter((profile) => profile.system_layout !== false);
+    // A system saved with a card or rear-group layout keeps it until the
+    // operator picks another, so Save does not change it.
+    const currentProfile = listedProfiles.some((profile) => profile.id === selectedValue)
+      ? null
+      : getProfileById(selectedValue);
     const options = ['<option value="">Detect automatically</option>'].concat(
-      state.profiles.map((profile) => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`)
+      listedProfiles.map((profile) => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`),
+      currentProfile
+        ? [`<option value="${escapeHtml(currentProfile.id)}">${escapeHtml(`Current: ${currentProfile.label}`)}</option>`]
+        : []
     );
     elements.setupProfile.innerHTML = options.join("");
     if (selectedValue && state.profiles.some((profile) => profile.id === selectedValue)) {
@@ -1993,15 +2004,27 @@
     );
   }
 
+  function storageViewTemplateProfileIds() {
+    // Profiles whose hardware a virtual or internal template already offers,
+    // so Add a view lists that hardware once (#952).
+    return new Set(
+      state.storageViewTemplates
+        .filter((template) => template.kind !== "ses_enclosure" && template.same_hardware_profile_id)
+        .map((template) => template.same_hardware_profile_id)
+    );
+  }
+
   function addableStorageViewProfiles() {
+    const templateProfileIds = storageViewTemplateProfileIds();
     return orderedStorageViewProfiles().filter(
-      (profile) => liveEnclosureMatchesForProfile(profile?.id).length === 0
+      (profile) => liveEnclosureMatchesForProfile(profile?.id).length === 0 && !templateProfileIds.has(profile?.id)
     );
   }
 
   function hiddenLiveChassisProfiles() {
+    const templateProfileIds = storageViewTemplateProfileIds();
     return orderedStorageViewProfiles().filter(
-      (profile) => liveEnclosureMatchesForProfile(profile?.id).length > 0
+      (profile) => liveEnclosureMatchesForProfile(profile?.id).length > 0 && !templateProfileIds.has(profile?.id)
     );
   }
 
@@ -2965,10 +2988,20 @@
 
   function storageViewAddDefaultValue() {
     const pinnedProfile = currentPinnedProfile();
-    if (pinnedProfile && liveEnclosureMatchesForProfile(pinnedProfile.id).length === 0) {
+    const addableProfiles = addableStorageViewProfiles();
+    if (pinnedProfile && addableProfiles.some((profile) => profile.id === pinnedProfile.id)) {
       return storageViewAddValueForProfile(pinnedProfile.id);
     }
-    const firstProfile = addableStorageViewProfiles()[0];
+    // A card or rear-group pin is offered as its internal view (#952).
+    const pinnedTemplate = pinnedProfile
+      ? state.storageViewTemplates.find(
+        (template) => template.kind !== "ses_enclosure" && template.same_hardware_profile_id === pinnedProfile.id
+      )
+      : null;
+    if (pinnedTemplate) {
+      return pinnedTemplate.id;
+    }
+    const firstProfile = addableProfiles[0];
     if (firstProfile) {
       return storageViewAddValueForProfile(firstProfile.id);
     }
@@ -4039,6 +4072,12 @@
     setBanner(`Added ${availableCandidates.length} unmapped inventory candidates to ${selectedStorageView.label}.`, "success");
   }
 
+  function candidateBusLabel(bus) {
+    // TrueNAS reports bus "UNKNOWN" for NVMe; alone it reads like a health state (#952).
+    const value = String(bus || "").trim();
+    return value && value.toLowerCase() !== "unknown" ? value : null;
+  }
+
   function renderStorageViewCandidates() {
     if (!elements.setupStorageViewCandidatesList || !elements.setupStorageViewCandidatesHelp || !elements.setupStorageViewCandidatesAddAllButton) {
       return;
@@ -4080,7 +4119,8 @@
       elements.setupStorageViewCandidatesList.innerHTML = "";
       return;
     }
-    elements.setupStorageViewCandidatesHelp.textContent = `Drives on ${where} not yet shown in a view:`;
+    // The list also holds drives this view already shows, marked Attached (#952).
+    elements.setupStorageViewCandidatesHelp.textContent = `Drives on ${where} that are not in a chassis bay or another view:`;
     elements.setupStorageViewCandidatesList.innerHTML = availableCandidates
       .map((candidate) => {
         const attached = candidateBindingAlreadyAttached(candidate, selectedStorageView);
@@ -4102,7 +4142,7 @@
                   candidate.serial ? `serial ${candidate.serial}` : null,
                   candidate.pool_name ? `pool ${candidate.pool_name}` : null,
                   candidate.transport_address ? candidate.transport_address : null,
-                  candidate.bus ? candidate.bus : null,
+                  candidateBusLabel(candidate.bus),
                 ].filter(Boolean).map((item) => `<span class="meta-chip">${escapeHtml(item)}</span>`).join("")}
               </div>
               <p>${escapeHtml(deviceSummary)}</p>
@@ -5425,6 +5465,14 @@
     state.haNodesLoading = false;
     state.viewOrder = Array.isArray(system.view_order) ? [...system.view_order] : [];
     state.autoStorageViews = system.auto_storage_views !== false;
+    // Both selects still hold the previous system's choices. Clear them before
+    // the storage views render, so Add a view takes this system's default (#952).
+    if (elements.setupProfile) {
+      elements.setupProfile.value = "";
+    }
+    if (elements.setupStorageViewTemplate) {
+      elements.setupStorageViewTemplate.value = "";
+    }
     replaceStorageViewState(system.storage_views || []);
     if (elements.setupSystemLabel) {
       elements.setupSystemLabel.value = system.label || system.id || "";
@@ -8177,6 +8225,9 @@
         state.selectedProfileId = savedProfileId;
         if (elements.setupProfile) {
           elements.setupProfile.value = savedProfileId;
+          // Shows a card or rear-group layout as Current, or drops a stale
+          // Current option (#952).
+          renderProfileOptions();
         }
         recordSetupDraftChange(draftBefore);
         owner.advance();
@@ -8536,6 +8587,8 @@
     });
     elements.setupProfile?.addEventListener("change", () => {
       state.selectedProfileId = elements.setupProfile?.value || "";
+      // Drops a Current card or rear-group option once another layout is chosen (#952).
+      renderProfileOptions();
       renderProfilePreview();
       renderProfileCatalog();
       renderProfileBuilder();
@@ -8564,6 +8617,9 @@
       const draftBefore = setupDraftSnapshot();
       state.selectedProfileId = card.dataset.profileId || "";
       elements.setupProfile.value = state.selectedProfileId;
+      // Shows a card or rear-group pick as Current, or drops that option once
+      // a chassis is picked (#952).
+      renderProfileOptions();
       recordSetupDraftChange(draftBefore);
       renderProfilePreview();
       elements.profileCatalog.querySelectorAll("[data-profile-id]").forEach((profileCard) => {

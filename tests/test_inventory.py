@@ -85,6 +85,7 @@ from app.services.profile_registry import (
     ESXI_AOC_SLG4_2H8M2_PROFILE_ID,
     SCALE_SSG_FRONT_24_PROFILE_ID,
     SUPERMICRO_FATTWIN_FRONT_6_PROFILE_ID,
+    SUPERMICRO_FATTWIN_REAR_2_PROFILE_ID,
     UNIFI_UNVR_FRONT_4_PROFILE_ID,
     UNIFI_UNVR_PRO_FRONT_7_PROFILE_ID,
 )
@@ -2603,6 +2604,26 @@ class InventoryHelpersTests(unittest.TestCase):
         self.assertEqual(esxi_binding.device_names, ["13:0", "13:1"])
         self.assertEqual(esxi_binding.pcie_addresses, ["C0 x4", "C1 x4"])
         self.assertNotIn("ESXi", f"{template.summary} {template.notes or ''}")
+
+    def test_card_and_rear_group_templates_name_their_chassis_profile(self) -> None:
+        # #952: Add a view offers this hardware once, as the template.
+        named = {
+            template.id: template.same_hardware_profile_id
+            for template in list_storage_view_templates()
+            if template.same_hardware_profile_id
+        }
+        self.assertEqual(
+            named,
+            {
+                "aoc-slg4-2h8m2-2": ESXI_AOC_SLG4_2H8M2_PROFILE_ID,
+                "fat-twin-rear-2": SUPERMICRO_FATTWIN_REAR_2_PROFILE_ID,
+            },
+        )
+        registry = ProfileRegistry(Settings())
+        for template_id, profile_id in named.items():
+            with self.subTest(template=template_id):
+                self.assertNotEqual(get_storage_view_template(template_id).kind, "ses_enclosure")
+                self.assertIsNotNone(registry.get(profile_id))
 
     def test_every_template_shows_new_views_and_names_known_platforms(self) -> None:
         platforms = set(get_args(TrueNASConfig.model_fields["platform"].annotation))
@@ -24589,6 +24610,24 @@ class StorageViewPoolHealthTests(unittest.IsolatedAsyncioTestCase):
             service._build_slot_view_from_storage_view_runtime_slot(view, empty).state,
             SlotState.empty,
         )
+
+    def test_candidate_description_does_not_start_with_an_unknown_bus(self) -> None:
+        # TrueNAS reports bus "UNKNOWN" for NVMe disks (#952); alone it reads
+        # like an unknown health state.
+        from dataclasses import replace
+
+        service = InventoryDefaultRegressionTests._bare_service("core")
+        for bus in ("UNKNOWN", "unknown", " Unknown "):
+            with self.subTest(bus=bus):
+                candidate = service._serialize_storage_view_candidate(replace(self._nvme_record(0), bus=bus))
+                self.assertEqual(
+                    candidate["description"],
+                    "Synthetic NVMe, 1.8 TiB (2.0 TB), pool flashpool, 0000:60:00.0",
+                )
+                self.assertNotIn("unknown", candidate["description"].lower())
+                self.assertEqual(candidate["bus"], bus, "the raw bus value is still returned")
+        candidate = service._serialize_storage_view_candidate(self._nvme_record(0))
+        self.assertTrue(candidate["description"].startswith("NVME, Synthetic NVMe"))
 
     def test_candidate_without_a_pool_field_takes_the_pool_from_its_member(self) -> None:
         # A pool-bound view matches on the candidate's pool name; a disk row

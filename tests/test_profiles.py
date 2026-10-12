@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.config import SystemConfig, TrueNASConfig, _load_profile_yaml, get_settings
+from app.config import EnclosureProfileConfig, SystemConfig, TrueNASConfig, _load_profile_yaml, get_settings
 from app.models.domain import EnclosureOption
 from app.services.profile_registry import (
     CORE_CSE_946_PROFILE_ID,
@@ -23,11 +23,13 @@ from app.services.profile_registry import (
     QUANTASTOR_SSG_SHARED_24_PROFILE_ID,
     SCALE_SSG_FRONT_24_PROFILE_ID,
     SCALE_SSG_REAR_12_PROFILE_ID,
+    SUPERMICRO_FATTWIN_REAR_2_PROFILE_ID,
     ProfileRegistry,
     UNIFI_UNVR_FRONT_4_PROFILE_ID,
     UNIFI_UNVR_PRO_FRONT_7_PROFILE_ID,
     build_profile_reference_warnings,
     built_in_profile_ids,
+    profile_is_system_layout,
 )
 
 
@@ -328,6 +330,46 @@ class ProfileRegistryTests(unittest.TestCase):
         self.assertIsNotNone(profile_106)
         self.assertEqual(profile_106.slot_layout[0][:2], [None, None])
         self.assertEqual(profile_106.slot_layout[3][:2], [104, 105])
+
+    def test_only_chassis_and_shelf_profiles_are_system_layouts(self) -> None:
+        # #952: the M.2 card and the FatTwin rear 2-bay group are step 4 views,
+        # not a whole system's chassis layout.
+        settings = get_settings().model_copy(
+            update={
+                "profiles": [
+                    EnclosureProfileConfig(
+                        id="synthetic-m2-card", label="Synthetic M.2 card",
+                        face_style="nvme-carrier", rows=1, columns=4,
+                    ),
+                    EnclosureProfileConfig(
+                        id="synthetic-front-12", label="Synthetic front 12",
+                        face_style="front-drive", rows=3, columns=4,
+                    ),
+                ]
+            }
+        )
+        registry = ProfileRegistry(settings)
+        not_system_layouts = {
+            profile.id for profile in registry.list_profiles() if not profile_is_system_layout(profile)
+        }
+        self.assertNotIn("system_layout", registry.get(GENERIC_FRONT_24_1X24_PROFILE_ID).model_dump())
+
+        self.assertEqual(
+            not_system_layouts,
+            {ESXI_AOC_SLG4_2H8M2_PROFILE_ID, SUPERMICRO_FATTWIN_REAR_2_PROFILE_ID, "synthetic-m2-card"},
+        )
+        for profile_id in (
+            SCALE_SSG_REAR_12_PROFILE_ID,
+            LINUX_GPU_SERVER_NVME_PROFILE_ID,
+            UNIFI_UNVR_FRONT_4_PROFILE_ID,
+            "synthetic-front-12",
+        ):
+            with self.subTest(profile_id=profile_id):
+                self.assertTrue(profile_is_system_layout(registry.get(profile_id)))
+
+        # Detect automatically on ESXi still resolves to the card profile.
+        esxi = SystemConfig(id="synthetic-esxi", truenas=TrueNASConfig(platform="esxi"))
+        self.assertEqual(registry.select_profile_id(esxi), ESXI_AOC_SLG4_2H8M2_PROFILE_ID)
 
     def test_profile_reference_warnings_read_as_plain_words(self) -> None:
         settings = get_settings().model_copy(

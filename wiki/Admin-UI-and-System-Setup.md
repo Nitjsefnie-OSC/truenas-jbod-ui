@@ -175,7 +175,13 @@ That means:
 
 If a live enclosure already auto-populates for the loaded system, the add list
 hides the duplicate saved chassis option so the admin UI does not encourage
-live-versus-saved clones.
+live-versus-saved clones. The Supermicro AOC-SLG4-2H8M2 card and the FatTwin
+rear 2-bay group are listed once, as internal views.
+
+The system's **Chassis layout** list offers chassis and shelf layouts only. An
+M.2 card or a rear 2-bay group is added here as a storage view instead. A
+system already saved with one of those layouts keeps it, shown as
+`Current: <layout>`, until you pick another.
 
 A system with no saved views shows a generated **Primary Chassis** that uses
 the system's **Chassis layout**. Saving without changing the storage views
