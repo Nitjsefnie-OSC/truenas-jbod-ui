@@ -39,8 +39,9 @@ fixed `v0.24.0-beta.3` and `0.24.0-beta.3` tags and moves `dev` to it;
   shelf the bay was found on (#934).
 - Storage Fabric shows each rear-shelf bay of a cascaded JBOD with its own
   controller entry and kernel errors instead of the next bay's (#940).
-- Overlapping refreshes no longer answer busy, and history keeps recording
-  UNVR and UNVR Pro bays when only an optional command fails (#929, #932).
+- Overlapping refreshes no longer answer busy, including Refresh Now on a
+  system with two enclosures, and history keeps recording UNVR and UNVR Pro
+  bays when only an optional command fails (#929, #932, #946).
 - The admin bootstrap's remaining wildcard sudo grants are now anchored
   patterns (#942).
 
@@ -90,6 +91,10 @@ fixed `v0.24.0-beta.3` and `0.24.0-beta.3` tags and moves `dev` to it;
 
 ### Fixed
 
+- Refresh Now on a system with two enclosures no longer fails with "server
+  busy" when the other enclosure is published from the same fresh data while
+  the forced refresh is still running. A refresh built from older data, or one
+  that saw a different set of enclosures, still fails closed (#946).
 - SCALE and QuantaStor refreshes now skip saved `sg_ses` reads of a fixed
   `/dev/sgN` device. The app already finds enclosure devices itself, and `sg`
   numbers can change after a reboot, so a saved line could end up reading a

@@ -21,9 +21,10 @@ each pull request.
 - Storage Fabric matches each bay to its controller entry by the disk's own
   controller target. On a cascaded JBOD, rear-shelf bays used to show the next
   bay's controller row and kernel errors.
-- Overlapping history and inventory refreshes no longer answer busy, and
-  history keeps recording UNVR and UNVR Pro bays when only an optional command
-  fails.
+- Overlapping history and inventory refreshes no longer answer busy. That
+  includes Refresh Now on a system with two enclosures when the other enclosure
+  is rebuilt from the same fresh data during the refresh. History keeps
+  recording UNVR and UNVR Pro bays when only an optional command fails.
 - Bays keep their state chip and LED dot when selected, a lit locate light
   blinks, the Connections panel can be cleared, and each system can set the
   order its enclosures and views open in.
