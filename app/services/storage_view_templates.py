@@ -9,6 +9,10 @@ from app.config import (
     StorageViewKind,
     StorageViewRenderConfig,
 )
+from app.services.profile_registry import (
+    ESXI_AOC_SLG4_2H8M2_PROFILE_ID,
+    SUPERMICRO_FATTWIN_REAR_2_PROFILE_ID,
+)
 
 
 class StorageViewTemplate(BaseModel):
@@ -31,6 +35,9 @@ class StorageViewTemplate(BaseModel):
     supports_led: bool = False
     supports_auto_discovery: bool = False
     notes: str | None = None
+    # A built-in chassis profile that draws the same hardware. Add a view then
+    # offers the hardware once, as this template (#952).
+    same_hardware_profile_id: str | None = None
 
 
 def build_sequential_layout(rows: int, columns: int, slot_count: int) -> list[list[int | None]]:
@@ -173,6 +180,7 @@ def list_storage_view_templates() -> list[StorageViewTemplate]:
             notes=(
                 "View only: LED and RAID actions are not available for this card."
             ),
+            same_hardware_profile_id=ESXI_AOC_SLG4_2H8M2_PROFILE_ID,
         ),
         StorageViewTemplate(
             id="satadom-pair-2",
@@ -229,6 +237,7 @@ def list_storage_view_templates() -> list[StorageViewTemplate]:
                 "Two rear hot-swap bays on a FatTwin node. Slot 1 is drawn above slot 0. Bays can "
                 "be matched by BMC slot number."
             ),
+            same_hardware_profile_id=SUPERMICRO_FATTWIN_REAR_2_PROFILE_ID,
         ),
         StorageViewTemplate(
             id="embedded-boot-media-1",

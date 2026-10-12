@@ -46,6 +46,7 @@ from admin_service.main import get_esxi_host_prep_service
 from admin_service.route_support import get_history_store
 from admin_service.route_support import observe_backup_route
 from admin_service.route_support import resolve_public_origin
+from admin_service.route_support import serialize_profiles
 from admin_service.route_support import stream_limited_request_body_to_file
 from admin_service.route_support import templates as admin_templates
 from app.config import (
@@ -78,6 +79,11 @@ from app.models.domain import SystemSetupSudoPreviewRequest
 from app.models.domain import SystemBackupExportRequest
 from app.request_context import request_context
 from app.services.profile_registry import UNIFI_UNVR_FRONT_4_PROFILE_ID
+from app.services.profile_registry import (
+    ESXI_AOC_SLG4_2H8M2_PROFILE_ID,
+    SUPERMICRO_FATTWIN_FRONT_6_PROFILE_ID,
+    SUPERMICRO_FATTWIN_REAR_2_PROFILE_ID,
+)
 from app.services.ssh_probe import SSHCommandResult
 from app.services.snapshot_export import PackagedSnapshotExport, SnapshotExportBusyError
 from app.services.system_setup import PRESERVE_SECRET_SENTINEL
@@ -2701,6 +2707,28 @@ class AdminStatePayloadTests(unittest.TestCase):
         self.assertIn('id="admin-configuration-warnings"', template)
         self.assertIn("configuration_warnings", script)
         self.assertIn("renderConfigurationWarnings", script)
+
+    def test_admin_profiles_say_which_ones_a_system_can_use_as_its_chassis_layout(self) -> None:
+        # #952: the Chassis layout list reads this flag; the card and rear-group
+        # profiles stay in the catalog for step 4 and for saved systems.
+        settings = Settings(
+            profiles=[
+                EnclosureProfileConfig(
+                    id="synthetic-m2-card", label="Synthetic M.2 card", face_style="nvme-carrier", rows=1, columns=2,
+                ),
+                EnclosureProfileConfig(
+                    id="synthetic-shelf", label="Synthetic shelf", face_style="front-drive", rows=1, columns=4,
+                ),
+            ]
+        )
+        flags = {profile["id"]: profile["system_layout"] for profile in serialize_profiles(settings)}
+
+        self.assertEqual(
+            {profile_id for profile_id, flag in flags.items() if not flag},
+            {ESXI_AOC_SLG4_2H8M2_PROFILE_ID, SUPERMICRO_FATTWIN_REAR_2_PROFILE_ID, "synthetic-m2-card"},
+        )
+        self.assertTrue(flags["synthetic-shelf"])
+        self.assertTrue(flags[SUPERMICRO_FATTWIN_FRONT_6_PROFILE_ID])
 
     def test_build_admin_state_payload_includes_profile_defaults_and_public_origin(self) -> None:
         settings = Settings(

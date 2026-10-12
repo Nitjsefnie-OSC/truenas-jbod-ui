@@ -19,7 +19,7 @@ function functionSource(name) {
 
 const FUNCTIONS = [
   "escapeHtml", "getProfileById", "currentPinnedProfileId", "currentPinnedProfile",
-  "systemLayoutProfiles", "renderProfileOptions",
+  "renderProfileOptions",
   "orderedStorageViewProfiles", "currentLiveEnclosures", "liveEnclosureMatchesForProfile",
   "storageViewTemplateProfileIds", "addableStorageViewProfiles", "hiddenLiveChassisProfiles",
   "storageViewAddValueForProfile", "storageViewAddOptionsHtml", "storageViewAddDefaultValue",
@@ -242,7 +242,7 @@ test("the candidate heading matches a list holding an attached and an unmapped d
   // The list holds a drive this view already shows, so the heading cannot say
   // "not yet shown in a view".
   assert.doesNotMatch(help, /not yet/i);
-  assert.equal(help, "Drives on synthetic-core that are not in a bay or another view:");
+  assert.equal(help, "Drives on synthetic-core that are not in a chassis bay or another view:");
 });
 
 test("the candidate panel title does not promise drives that are in no view", () => {
@@ -296,5 +296,28 @@ test("loading a system saved with a card profile after a chassis system keeps th
     assert.equal(state.selectedProfileId, saved);
     context.load({ id: "synthetic-twin-front", platform: "ipmi", default_profile_id: "supermicro-fat-twin-front-6" });
     assert.equal(elements.setupProfile.value, "supermicro-fat-twin-front-6");
+  }
+});
+
+test("picking a card layout from the layout catalog keeps the select and the saved value in step", () => {
+  // The real catalog click handler, with the profile builder renders stubbed.
+  const start = SOURCE.indexOf("    elements.profileCatalog?.addEventListener(\"click\", (event) => {");
+  const end = SOURCE.indexOf("\n    elements.profileBuilderLoadButton", start);
+  assert.ok(start > 0 && end > start);
+  const { api, elements, state } = load({ selectedProfileId: "supermicro-fat-twin-front-6" });
+  api.renderProfileOptions();
+  let onClick = null;
+  elements.profileCatalog = { addEventListener: (name, listener) => { onClick = listener; }, querySelectorAll: () => [] };
+  const context = vm.createContext({
+    state, elements, renderProfileOptions: api.renderProfileOptions,
+    setupDraftSnapshot: () => "", recordSetupDraftChange() {}, renderProfilePreview() {},
+    renderProfileBuilder() {}, renderStorageViews() {},
+  });
+  vm.runInContext(SOURCE.slice(start, end), context, { filename: "admin.js" });
+  for (const picked of [...EXCLUDED_PROFILE_IDS, "generic-front-24-1x24"]) {
+    const card = { dataset: { profileId: picked } };
+    onClick({ target: { closest: () => card } });
+    assert.equal(state.selectedProfileId, picked);
+    assert.equal(elements.setupProfile.value, picked, `Save would post ${elements.setupProfile.value || "auto"}`);
   }
 });

@@ -1729,8 +1729,19 @@
       return;
     }
     const selectedValue = elements.setupProfile.value || state.selectedProfileId || "";
+    // Chassis and shelf faces only; an M.2 card or a rear 2-bay group is added
+    // in step 4 as a storage view (#952).
+    const listedProfiles = state.profiles.filter((profile) => profile.system_layout !== false);
+    // A system saved with a card or rear-group layout keeps it until the
+    // operator picks another, so Save does not change it.
+    const currentProfile = listedProfiles.some((profile) => profile.id === selectedValue)
+      ? null
+      : getProfileById(selectedValue);
     const options = ['<option value="">Detect automatically</option>'].concat(
-      state.profiles.map((profile) => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`)
+      listedProfiles.map((profile) => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`),
+      currentProfile
+        ? [`<option value="${escapeHtml(currentProfile.id)}">${escapeHtml(`Current: ${currentProfile.label}`)}</option>`]
+        : []
     );
     elements.setupProfile.innerHTML = options.join("");
     if (selectedValue && state.profiles.some((profile) => profile.id === selectedValue)) {
@@ -1810,15 +1821,27 @@
     );
   }
 
+  function storageViewTemplateProfileIds() {
+    // Profiles whose hardware a virtual or internal template already offers,
+    // so Add a view lists that hardware once (#952).
+    return new Set(
+      state.storageViewTemplates
+        .filter((template) => template.kind !== "ses_enclosure" && template.same_hardware_profile_id)
+        .map((template) => template.same_hardware_profile_id)
+    );
+  }
+
   function addableStorageViewProfiles() {
+    const templateProfileIds = storageViewTemplateProfileIds();
     return orderedStorageViewProfiles().filter(
-      (profile) => liveEnclosureMatchesForProfile(profile?.id).length === 0
+      (profile) => liveEnclosureMatchesForProfile(profile?.id).length === 0 && !templateProfileIds.has(profile?.id)
     );
   }
 
   function hiddenLiveChassisProfiles() {
+    const templateProfileIds = storageViewTemplateProfileIds();
     return orderedStorageViewProfiles().filter(
-      (profile) => liveEnclosureMatchesForProfile(profile?.id).length > 0
+      (profile) => liveEnclosureMatchesForProfile(profile?.id).length > 0 && !templateProfileIds.has(profile?.id)
     );
   }
 
@@ -2782,10 +2805,11 @@
 
   function storageViewAddDefaultValue() {
     const pinnedProfile = currentPinnedProfile();
-    if (pinnedProfile && liveEnclosureMatchesForProfile(pinnedProfile.id).length === 0) {
+    const addableProfiles = addableStorageViewProfiles();
+    if (pinnedProfile && addableProfiles.some((profile) => profile.id === pinnedProfile.id)) {
       return storageViewAddValueForProfile(pinnedProfile.id);
     }
-    const firstProfile = addableStorageViewProfiles()[0];
+    const firstProfile = addableProfiles[0];
     if (firstProfile) {
       return storageViewAddValueForProfile(firstProfile.id);
     }
@@ -3856,6 +3880,12 @@
     setBanner(`Added ${availableCandidates.length} unmapped inventory candidates to ${selectedStorageView.label}.`, "success");
   }
 
+  function candidateBusLabel(bus) {
+    // TrueNAS reports bus "UNKNOWN" for NVMe; alone it reads like a health state (#952).
+    const value = String(bus || "").trim();
+    return value && value.toLowerCase() !== "unknown" ? value : null;
+  }
+
   function renderStorageViewCandidates() {
     if (!elements.setupStorageViewCandidatesList || !elements.setupStorageViewCandidatesHelp || !elements.setupStorageViewCandidatesAddAllButton) {
       return;
@@ -3897,7 +3927,8 @@
       elements.setupStorageViewCandidatesList.innerHTML = "";
       return;
     }
-    elements.setupStorageViewCandidatesHelp.textContent = `Drives on ${where} not yet shown in a view:`;
+    // The list also holds drives this view already shows, marked Attached (#952).
+    elements.setupStorageViewCandidatesHelp.textContent = `Drives on ${where} that are not in a chassis bay or another view:`;
     elements.setupStorageViewCandidatesList.innerHTML = availableCandidates
       .map((candidate) => {
         const attached = candidateBindingAlreadyAttached(candidate, selectedStorageView);
@@ -3919,7 +3950,7 @@
                   candidate.serial ? `serial ${candidate.serial}` : null,
                   candidate.pool_name ? `pool ${candidate.pool_name}` : null,
                   candidate.transport_address ? candidate.transport_address : null,
-                  candidate.bus ? candidate.bus : null,
+                  candidateBusLabel(candidate.bus),
                 ].filter(Boolean).map((item) => `<span class="meta-chip">${escapeHtml(item)}</span>`).join("")}
               </div>
               <p>${escapeHtml(deviceSummary)}</p>
@@ -5249,6 +5280,10 @@
     }
     if (elements.setupPlatform) {
       elements.setupPlatform.value = system.platform || "core";
+    }
+    if (elements.setupProfile) {
+      // The select still holds the previous system's layout; this one's saved layout wins.
+      elements.setupProfile.value = "";
     }
     renderProfileOptions();
     if (elements.setupProfile) {
@@ -7973,6 +8008,10 @@
         state.selectedProfileId = savedProfileId;
         if (elements.setupProfile) {
           elements.setupProfile.value = savedProfileId;
+          if (elements.setupProfile.value !== savedProfileId) {
+            // Not a chassis layout, so not listed: show it as Current.
+            renderProfileOptions();
+          }
         }
         recordSetupDraftChange(draftBefore);
         owner.advance();
@@ -8347,6 +8386,10 @@
       const draftBefore = setupDraftSnapshot();
       state.selectedProfileId = card.dataset.profileId || "";
       elements.setupProfile.value = state.selectedProfileId;
+      if (elements.setupProfile.value !== state.selectedProfileId) {
+        // Not a chassis layout, so not listed: show it as Current.
+        renderProfileOptions();
+      }
       recordSetupDraftChange(draftBefore);
       renderProfilePreview();
       elements.profileCatalog.querySelectorAll("[data-profile-id]").forEach((profileCard) => {

@@ -536,6 +536,24 @@ def _profile_to_view(profile: EnclosureProfileConfig) -> EnclosureProfileView:
     )
 
 
+# An M.2 card or a node's rear 2-bay group sits inside a system. Step 4 adds it
+# as a storage view; System Setup does not offer it as the whole system's
+# Chassis layout (#952). Server-side auto-selection is unchanged.
+STORAGE_VIEW_ONLY_PROFILE_IDS = frozenset({
+    ESXI_AOC_SLG4_2H8M2_PROFILE_ID,
+    SUPERMICRO_FATTWIN_REAR_2_PROFILE_ID,
+})
+STORAGE_VIEW_ONLY_FACE_STYLES = frozenset({"nvme-carrier"})
+
+
+def profile_is_system_layout(profile: EnclosureProfileConfig | EnclosureProfileView) -> bool:
+    """True for a chassis or shelf face that a whole system can be drawn as."""
+    return (
+        profile.id not in STORAGE_VIEW_ONLY_PROFILE_IDS
+        and profile.face_style not in STORAGE_VIEW_ONLY_FACE_STYLES
+    )
+
+
 def built_in_profile_ids() -> set[str]:
     return {profile.id for profile in _built_in_profiles()}
 

@@ -29,6 +29,7 @@ from app.services.profile_registry import (
     UNIFI_UNVR_PRO_FRONT_7_PROFILE_ID,
     build_profile_reference_warnings,
     built_in_profile_ids,
+    profile_is_system_layout,
 )
 
 
@@ -349,8 +350,9 @@ class ProfileRegistryTests(unittest.TestCase):
         )
         registry = ProfileRegistry(settings)
         not_system_layouts = {
-            profile.id for profile in registry.list_profiles() if not profile.system_layout
+            profile.id for profile in registry.list_profiles() if not profile_is_system_layout(profile)
         }
+        self.assertNotIn("system_layout", registry.get(GENERIC_FRONT_24_1X24_PROFILE_ID).model_dump())
 
         self.assertEqual(
             not_system_layouts,
@@ -363,7 +365,7 @@ class ProfileRegistryTests(unittest.TestCase):
             "synthetic-front-12",
         ):
             with self.subTest(profile_id=profile_id):
-                self.assertTrue(registry.get(profile_id).system_layout)
+                self.assertTrue(profile_is_system_layout(registry.get(profile_id)))
 
         # Detect automatically on ESXi still resolves to the card profile.
         esxi = SystemConfig(id="synthetic-esxi", truenas=TrueNASConfig(platform="esxi"))

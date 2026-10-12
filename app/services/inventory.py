@@ -8019,9 +8019,11 @@ class InventoryService:
         # A disk row without a pool still belongs to the pool its member names,
         # as an enclosure bay does; pool-bound views match on it.
         pool_name = disk.pool_name or (normalize_text(pool_member.pool_name) if pool_member else None)
+        # TrueNAS reports bus "UNKNOWN" for NVMe; alone it reads like a health state (#952).
+        bus = normalize_text(disk.bus)
         description_parts = [
             "embedded boot media" if disk.raw.get("boot_media") else None,
-            normalize_text(disk.bus),
+            bus if bus and bus.lower() != "unknown" else None,
             normalize_text(disk.model),
             size_human,
             f"pool {pool_name}" if pool_name else None,
