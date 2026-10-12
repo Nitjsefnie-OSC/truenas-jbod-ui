@@ -5465,6 +5465,14 @@
     state.haNodesLoading = false;
     state.viewOrder = Array.isArray(system.view_order) ? [...system.view_order] : [];
     state.autoStorageViews = system.auto_storage_views !== false;
+    // Both selects still hold the previous system's choices. Clear them before
+    // the storage views render, so Add a view takes this system's default (#952).
+    if (elements.setupProfile) {
+      elements.setupProfile.value = "";
+    }
+    if (elements.setupStorageViewTemplate) {
+      elements.setupStorageViewTemplate.value = "";
+    }
     replaceStorageViewState(system.storage_views || []);
     if (elements.setupSystemLabel) {
       elements.setupSystemLabel.value = system.label || system.id || "";
@@ -5474,10 +5482,6 @@
     }
     if (elements.setupPlatform) {
       elements.setupPlatform.value = system.platform || "core";
-    }
-    if (elements.setupProfile) {
-      // The select still holds the previous system's layout; this one's saved layout wins.
-      elements.setupProfile.value = "";
     }
     renderProfileOptions();
     if (elements.setupProfile) {

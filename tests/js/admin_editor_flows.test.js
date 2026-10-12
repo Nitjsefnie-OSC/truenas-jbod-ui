@@ -901,6 +901,8 @@ test("loading a system restores its generated-view setting", () => {
       },
       retireAdminEditorControls: () => {},
       state,
+      // The selects cleared before the storage views render (#952).
+      elements: {},
     }
   );
 

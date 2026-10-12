@@ -24,7 +24,7 @@ const FUNCTIONS = [
   "storageViewTemplateProfileIds", "addableStorageViewProfiles", "hiddenLiveChassisProfiles",
   "storageViewAddValueForProfile", "storageViewAddOptionsHtml", "storageViewAddDefaultValue",
   "candidateBindingAlreadyAttached", "storageViewCandidateOwner", "visibleStorageViewCandidates",
-  "candidateBusLabel", "renderStorageViewCandidates",
+  "candidateBusLabel", "renderStorageViewCandidates", "renderStorageViewTemplateOptions",
 ];
 
 class Select {
@@ -108,6 +108,10 @@ function load({ selectedProfileId = "", storageViews = [], candidates = [], sele
     haTargetOptions: () => [],
     fetchStorageViewCandidates: () => assert.fail("no candidate fetch in this test"),
     getSelectedStorageView: () => state.storageViews.find((view) => view.id === state.selectedStorageViewId) || null,
+    // Other step 4 selects, not under test here.
+    storageViewTemplateOptionsHtml: () => "",
+    storageViewProfileOptionsHtml: () => "",
+    storageViewTargetOptionsHtml: () => "",
   });
   const names = FUNCTIONS.filter((name) => functionSource(name));
   vm.runInContext(
@@ -368,5 +372,41 @@ test("choosing a chassis in the Chassis layout select drops the Current card opt
       assert.ok(!elements.setupProfile.options.some((option) => option.value === saved),
         `${saved} is still offered after choosing ${picked || "Detect automatically"}`);
     }
+  }
+});
+
+test("loading another system resets Add a view to that system's default", () => {
+  // Codex review on #966: the Add select kept the previous system's choice, so a
+  // card-pinned system loaded next did not get its internal view as the default.
+  const start = SOURCE.indexOf("  function loadSystemIntoForm(system) {");
+  const end = SOURCE.indexOf("\n    if (elements.setupMakeDefault) {", start);
+  assert.ok(start > 0 && end > start);
+  const { api, elements, state } = load();
+  const field = () => ({ value: "" });
+  Object.assign(elements, {
+    setupSystemLabel: field(), setupSystemId: field(), setupPlatform: field(), setupStorageViewTemplate: new Select(),
+  });
+  const context = vm.createContext({
+    console, state, elements,
+    renderProfileOptions: api.renderProfileOptions,
+    retireAdminEditorControls: () => {},
+    normalizeHaNodes: (nodes) => nodes,
+    // The real replaceStorageViewState ends in renderStorageViews, which
+    // renders the Add select.
+    replaceStorageViewState: () => api.renderStorageViewTemplateOptions(),
+  });
+  vm.runInContext(`${SOURCE.slice(start, end)}\n  }\nglobalThis.load = loadSystemIntoForm;`, context, { filename: "admin.js" });
+
+  const expected = {
+    "supermicro-aoc-slg4-2h8m2": "aoc-slg4-2h8m2-2",
+    "supermicro-fat-twin-rear-2": "fat-twin-rear-2",
+    "generic-front-24-1x24": "profile:generic-front-24-1x24",
+  };
+  for (const [saved, addDefault] of Object.entries(expected)) {
+    context.load({ id: "synthetic-twin-front", platform: "ipmi", default_profile_id: "supermicro-fat-twin-front-6" });
+    assert.equal(elements.setupStorageViewTemplate.value, "profile:supermicro-fat-twin-front-6");
+    elements.setupStorageViewTemplate.value = "m2-carrier-passive-2";
+    context.load({ id: "synthetic-next", platform: "esxi", default_profile_id: saved });
+    assert.equal(elements.setupStorageViewTemplate.value, addDefault, `after loading a system saved with ${saved}`);
   }
 });
