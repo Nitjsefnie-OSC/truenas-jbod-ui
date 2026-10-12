@@ -9700,6 +9700,7 @@
       "system-inventory": "disk list",
       synthetic_fixture: "demo data",
       manual: "saved assignment",
+      import: "imported assignment",
       modeled: "modeled layout",
       inventory_candidate: "inventory match",
       snapshot_slot: "saved snapshot",

@@ -24078,9 +24078,15 @@ class InventoryDefaultRegressionTests(unittest.IsolatedAsyncioTestCase):
                     func = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
                     for keyword in node.keywords:
                         if keyword.arg in {"mapping_source", "resolution_source"} or (
-                            func == "DiskResolution" and keyword.arg == "source"
+                            func in {"DiskResolution", "ManualMapping"} and keyword.arg == "source"
                         ):
                             values |= leaves(keyword.value)
+                        # A saved mapping's source reaches the slot, including
+                        # the one an import writes with model_copy(update=...).
+                        if func == "model_copy" and keyword.arg == "update" and isinstance(keyword.value, ast.Dict):
+                            for key, value in zip(keyword.value.keys, keyword.value.values):
+                                if isinstance(key, ast.Constant) and key.value == "source":
+                                    values |= leaves(value)
                 elif isinstance(node, ast.Dict):
                     for key, value in zip(node.keys, node.values):
                         if isinstance(key, ast.Constant) and key.value in {"mapping_source", "mapping_resolution_source"}:
@@ -24116,7 +24122,10 @@ class InventoryDefaultRegressionTests(unittest.IsolatedAsyncioTestCase):
         backend.add(ManualMapping.model_fields["source"].default)
         backend |= set(typing.get_args(StorageViewRuntimeSlot.model_fields["source"].annotation))
         # The walk must keep finding the values the issue names.
-        self.assertTrue({"device-name", "ses-empty", "api-slot", "device-hint", "snapshot_slot"} <= backend, backend)
+        self.assertTrue(
+            {"device-name", "ses-empty", "api-slot", "device-hint", "snapshot_slot", "import"} <= backend,
+            backend,
+        )
 
         app_source = (root / "app/static/app.js").read_text(encoding="utf-8")
         start = app_source.index("function mappingSourceLabel(")

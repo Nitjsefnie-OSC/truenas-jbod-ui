@@ -56,6 +56,7 @@ test("SSH bay sources are named in plain words, not raw codes", () => {
   ]);
   assert.equal(mappingSourceLabel("device-name"), "SSH (device name)");
   assert.equal(mappingSourceLabel("ses-empty"), "SSH (empty bay)");
+  assert.equal(mappingSourceLabel("import"), "imported assignment");
   const note = mappingHealthSourceNote([
     { slot: 0, state: "healthy", mapping_source: "device-name" },
     { slot: 1, state: "empty", mapping_source: "ses-empty" },
