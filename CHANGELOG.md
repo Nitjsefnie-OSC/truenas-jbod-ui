@@ -26,7 +26,39 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   Highlights and Upgrade notes prepended via scripts/render_release_notes.py.
 -->
 
-## Unreleased
+## v0.24.0-beta.3 - 2026-10-11
+
+This prerelease adds the fixes merged after `v0.24.0-beta.2`. GHCR gets the
+fixed `v0.24.0-beta.3` and `0.24.0-beta.3` tags and moves `dev` to it;
+`latest` stays on `v0.23.0`.
+
+### Highlights
+
+- Locate lights answer in about a second with the enclosure's own readback,
+  and every press first checks that the enclosure device still belongs to the
+  shelf the bay was found on (#934).
+- Storage Fabric shows each rear-shelf bay of a cascaded JBOD with its own
+  controller entry and kernel errors instead of the next bay's (#940).
+- Overlapping refreshes no longer answer busy, including Refresh Now on a
+  system with two enclosures, and history keeps recording UNVR and UNVR Pro
+  bays when only an optional command fails (#929, #932, #946).
+- The admin bootstrap's remaining wildcard sudo grants are now anchored
+  patterns (#942).
+
+### Upgrade notes
+
+- This is a prerelease. `dev` is the only image tag that moves to it;
+  `latest` stays on `v0.23.0`. The pre-release security review in #737 still
+  has open items, which will be closed before `v0.24.0`.
+- Upgrading from `v0.24.0-beta.2` needs no configuration change. Upgrading
+  from `v0.23.0` or older, read the `v0.24.0-beta.1` and `v0.24.0-beta.2`
+  upgrade notes below too.
+- Hosts set up by an older bootstrap keep their stored sudo grants. Re-run SSH
+  access setup to replace them with the anchored ones; that needs sudo 1.9.10
+  or newer on the host (#942).
+- On SCALE and QuantaStor, saved `sg_ses` lines that read a fixed `/dev/sgN`
+  are now skipped with one refresh warning. Remove them from the system's SSH
+  command list (#944).
 
 ### Security
 
@@ -56,6 +88,7 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   timeout, initiator response timeout and iuCRC errors in the Storage Fabric
   diagnostics now say what the standard means by each code and what the code
   cannot tell you. (#939)
+
 ### Fixed
 
 - Refresh Now on a system with two enclosures no longer fails with "server
@@ -71,23 +104,25 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 - Storage Fabric now matches each bay to its controller entry by the disk's
   CAM target instead of its enclosure slot number. On a cascaded JBOD, every
   rear-shelf bay used to show the next bay's SAS address, controller row and
-  kernel errors (#940).
+  kernel errors (#940, fixes #936).
 - Made locate-light actions use a short independent session, return immediate
   hardware confirmation, and retain their result across page refreshes. Each
   press first checks, in the same session, that the enclosure device still
-  reports the shelf the bay was found on, and refuses if it does not (#934).
+  reports the shelf the bay was found on, and refuses if it does not
+  (#934, fixes #926).
 - Prevented overlapping history and background inventory refreshes from
-  returning retryable busy errors when another enclosure published first (#932).
+  returning retryable busy errors when another enclosure published first
+  (#932, fixes #928).
 - History records UNVR and UNVR Pro bays again when only an optional SSH
   command, such as `lsscsi -g -t`, fails. Hosts whose bay-map commands fail,
   such as ESXi without StorCLI, are still skipped. The history dashboard and
   `/healthz` now list every skipped system and the reason. Broke in
-  v0.23.0. (#929)
+  v0.23.0. (#929, fixes #927)
 - Selecting a bay, or a path in the Connections panel, no longer removes the
   state chip from that bay and its highlighted peers. Every bay, including
   NVMe carrier and boot-device cards, keeps its LED dot, and a bay with its
   locate light on blinks the dot and says "Locate light on" in its tooltip and
-  accessible name. (#935)
+  accessible name. (#935, fixes #925)
 - Stopped the Connections panel from narrowing the map before an operator picked
   a bay, path or node, and let repeated clicks, Show all and Escape restore every
   bay without hiding fault states. (#931)
@@ -96,7 +131,7 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   had merged them, so a missing disk could still count as placed. Records
   with different serials now always count as different disks, and so do
   records with different LUN ids unless one serial ties them together.
-  (#930)
+  (#930, fixes #921)
 
 ## v0.24.0-beta.2 - 2026-10-09
 

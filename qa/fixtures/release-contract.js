@@ -41,7 +41,25 @@ function buildFixture() {
   }
 }
 
-async function installFixture(page, html, { timing = false, esxi = "fat-twin", emptyInventory = false } = {}) {
+// A second system whose saved opening order starts on a saved view (#933).
+const secondSystemDefaultViewRuntime = {
+  ...runtime, system_id: "synthetic-second", system_label: "Second System",
+  views: [{ ...runtime.views[0], id: "second-chassis", label: "Second Chassis" }],
+  view_order: ["view:second-chassis", "enclosure:enc-a"],
+  default_selection: "view:second-chassis",
+};
+
+// A second system whose saved opening order starts on its other live shelf.
+const secondSystemDefaultEnclosureRuntime = {
+  system_id: "synthetic-second", system_label: "Second System", views: [],
+  view_order: ["enclosure:enc-b", "enclosure:enc-a"],
+  default_selection: "enclosure:enc-b",
+};
+
+async function installFixture(page, html, {
+  timing = false, esxi = "fat-twin", emptyInventory = false, secondSystemDefaultView = false,
+  secondSystemDefaultEnclosure = false,
+} = {}) {
   const diagnostics = { errors: [], warnings: [], unexpected: [], inventory: [], runtime: [] };
   const controls = { holdInventory: null, holdRuntime: null };
   page.on("pageerror", error => diagnostics.errors.push(error.message));
@@ -124,7 +142,10 @@ async function installFixture(page, html, { timing = false, esxi = "fat-twin", e
     } else if (url.pathname === "/api/storage-views") {
       diagnostics.runtime.push(url.href);
       if (controls.holdRuntime) await controls.holdRuntime(url);
-      payload = systemId === "synthetic-system" ? runtime : { system_id: systemId, views: [] };
+      payload = systemId === "synthetic-system" ? runtime
+        : secondSystemDefaultView && systemId === "synthetic-second" ? secondSystemDefaultViewRuntime
+          : secondSystemDefaultEnclosure && systemId === "synthetic-second" ? secondSystemDefaultEnclosureRuntime
+            : { system_id: systemId, views: [] };
     } else if (url.pathname === "/api/history/status") {
       payload = { configured: false, available: false };
     } else if (/^\/api\/(?:slots|storage-views\/[^/]+\/slots)\/(?:\d+\/smart|smart-batch)$/.test(url.pathname)) {

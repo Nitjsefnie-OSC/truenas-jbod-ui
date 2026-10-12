@@ -390,6 +390,52 @@ for (const timing of [false, true]) {
     }
   });
 
+  test(`opening view: timing ${timing}: a system switch that opens on a saved view settles on that view`, async ({ page }, testInfo) => {
+    test.setTimeout(12_000);
+    const { diagnostics } = await installFixture(page, html, { timing, secondSystemDefaultView: true });
+    const readiness = require("./release-readiness");
+    await switching.context.gotoApp(page);
+    await switching.context.setAutoRefresh(page, false);
+    try {
+      await readiness.switchSelectedScope(page, "#system-select", "synthetic-second");
+      await expect(page.locator("#enclosure-select")).toHaveValue("view:second-chassis");
+      const params = new URL(page.url()).searchParams;
+      expect(params.get("system_id")).toBe("synthetic-second");
+      expect(params.get("storage_view_id")).toBe("second-chassis");
+      expect(params.get("enclosure_id")).toBe("enc-a");
+      expect(diagnostics.errors).toEqual([]);
+      expect(diagnostics.warnings).toEqual([]);
+      expect(diagnostics.unexpected).toEqual([]);
+    } finally {
+      await testInfo.attach("synthetic-diagnostics", { body: JSON.stringify(diagnostics), contentType: "application/json" });
+    }
+  });
+
+  test(`opening enclosure: timing ${timing}: a system switch that opens on another live shelf settles`, async ({ page }, testInfo) => {
+    test.setTimeout(12_000);
+    const { diagnostics } = await installFixture(page, html, { timing, secondSystemDefaultEnclosure: true });
+    await switching.context.gotoApp(page);
+    await switching.context.setAutoRefresh(page, false);
+    try {
+      // The release spec's own switch, including its timing settlement.
+      await switching.context.switchSystem(page, "synthetic-second");
+      await expect(page.locator("#enclosure-select")).toHaveValue("enclosure:enc-b");
+      const params = new URL(page.url()).searchParams;
+      expect(params.get("system_id")).toBe("synthetic-second");
+      expect(params.get("enclosure_id")).toBe("enc-b");
+      if (timing) {
+        const latest = await switching.context.latestUiPerfRun(page);
+        expect(["system-switch", "opening-view"]).toContain(latest?.reason);
+        expect(latest?.status).toBe("done");
+      }
+      expect(diagnostics.errors).toEqual([]);
+      expect(diagnostics.warnings).toEqual([]);
+      expect(diagnostics.unexpected).toEqual([]);
+    } finally {
+      await testInfo.attach("synthetic-diagnostics", { body: JSON.stringify(diagnostics), contentType: "application/json" });
+    }
+  });
+
   test(`helper timeout: timing ${timing}: explicit budget reaches final runtime settlement`, async ({ page }) => {
     const { controls } = await installFixture(page, html, { timing });
     await switching.context.gotoApp(page);

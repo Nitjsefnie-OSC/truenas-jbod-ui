@@ -43,10 +43,34 @@ async function waitForSelectedScope(
   }, [systemId, enclosureValue, backingEnclosureId]), { timeout }).toBe(true);
 }
 
-async function refreshSelectedScope(page, action, { systemId, enclosureId, force = false, viewId = null, timeout = settleTimeout }) {
+// A system switch opens on the system's default selection (#933): the app
+// applies storage-views `default_selection` after the inventory response. A
+// saved view is selected locally; a different live enclosure is loaded by one
+// more inventory request, which then becomes the request this helper owns.
+async function openingSelection(runtimeResponse, inventorySnapshot) {
+  if (!runtimeResponse || !runtimeResponse.ok()) return {};
+  const runtime = await runtimeResponse.json();
+  const selection = String(runtime.default_selection || "");
+  if (selection.startsWith("view:")) {
+    const viewId = selection.slice("view:".length);
+    const shown = (runtime.views || []).some(view => view && view.id === viewId
+      && view.enabled !== false && view.render?.show_in_main_ui !== false);
+    return shown ? { viewId } : {};
+  }
+  if (selection.startsWith("enclosure:")) {
+    const enclosureId = selection.slice("enclosure:".length);
+    if (enclosureId && enclosureId !== inventorySnapshot.selected_enclosure_id) return { enclosureId };
+  }
+  return {};
+}
+
+async function refreshSelectedScope(page, action, {
+  systemId, enclosureId, force = false, viewId = null, timeout = settleTimeout, followOpening = false,
+}) {
   const origin = new URL(page.url()).origin;
   let ownedRequest;
   let latestRequest;
+  const laterInventoryRequests = [];
   const observeRequest = request => {
     const url = new URL(request.url());
     if (url.origin !== origin || url.pathname !== "/api/inventory" || request.method() !== "GET") return;
@@ -61,20 +85,48 @@ async function refreshSelectedScope(page, action, { systemId, enclosureId, force
     // regardless of force or selected scope. Observe that dispatch boundary,
     // not just requests eligible to become ours. Unrelated endpoints are ignored.
     if (ownedRequest) latestRequest = request;
+    if (ownedRequest && request !== ownedRequest) laterInventoryRequests.push(request);
   };
   // Own a request dispatched after registration, not just a response arriving
   // afterward. An already-in-flight request with the identical URL is excluded.
   page.on("request", observeRequest);
   const responsePromise = page.waitForResponse(response => response.request() === ownedRequest,
     { timeout });
+  const runtimePromise = followOpening ? page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.origin === origin && url.pathname === "/api/storage-views"
+      && response.request().method() === "GET" && url.searchParams.get("system_id") === systemId;
+  }, { timeout }) : null;
   try {
-    const [, response] = await Promise.all([Promise.resolve().then(action), responsePromise]);
+    let [, response] = await Promise.all([Promise.resolve().then(action), responsePromise]);
     expect(response.ok()).toBe(true);
-    const snapshot = await response.json();
+    let snapshot = await response.json();
     expect(snapshot.ok).not.toBe(false);
     expect(snapshot.selected_system_id).toBe(systemId);
     const requestedEnclosure = new URL(response.url()).searchParams.get("enclosure_id");
     if (requestedEnclosure) expect(snapshot.selected_enclosure_id).toBe(requestedEnclosure);
+    if (runtimePromise) {
+      const opening = await openingSelection(await runtimePromise, snapshot);
+      if (opening.viewId) viewId = opening.viewId;
+      if (opening.enclosureId) {
+        let openingRequest;
+        await expect.poll(() => {
+          openingRequest = laterInventoryRequests.find(request => {
+            const url = new URL(request.url());
+            return url.searchParams.get("system_id") === systemId
+              && url.searchParams.get("enclosure_id") === opening.enclosureId;
+          });
+          return Boolean(openingRequest);
+        }, { timeout }).toBe(true);
+        response = await openingRequest.response();
+        expect(response && response.ok()).toBe(true);
+        snapshot = await response.json();
+        expect(snapshot.ok).not.toBe(false);
+        expect(snapshot.selected_system_id).toBe(systemId);
+        expect(snapshot.selected_enclosure_id).toBe(opening.enclosureId);
+        ownedRequest = openingRequest;
+      }
+    }
     await waitForSelectedScope(page, { systemId, timeout, backingEnclosureId: snapshot.selected_enclosure_id,
       enclosureValue: viewId
       ? `view:${viewId}` : snapshot.selected_enclosure_id == null || snapshot.selected_enclosure_id === ""
@@ -98,8 +150,10 @@ async function switchSelectedScope(page, selector, value) {
     return;
   }
   await refreshSelectedScope(page, () => page.locator(selector).selectOption(value), {
-    // A system switch may restore its cached enclosure before dispatch.
+    // A system switch may restore its cached enclosure before dispatch, then
+    // opens on the system's default enclosure or saved view.
     systemId, enclosureId: selector === "#system-select" ? undefined : value.slice("enclosure:".length),
+    followOpening: selector === "#system-select",
   });
 }
 
