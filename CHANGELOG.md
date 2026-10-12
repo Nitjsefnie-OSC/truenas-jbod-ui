@@ -47,6 +47,11 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   script on stdin, stops before any change when the CORE account is missing or
   its home is not under `/mnt`, and stores SMART grants that still match after
   the middleware escapes commas (#957).
+- On TrueNAS CORE with SSH, the page no longer asked to turn on SSH when SSH
+  had mapped the bays, named the real source of enclosures and bay positions,
+  said "Empty" for an empty NVMe slot, did not offer locate lights on a view
+  without them, and dropped "Previous version unknown" on a first start
+  (#958).
 
 ## v0.24.0-beta.3 - 2026-10-11
 

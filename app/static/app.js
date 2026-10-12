@@ -328,6 +328,7 @@
   const summaryDiskCount = document.getElementById("summary-disk-count");
   const summaryPoolCount = document.getElementById("summary-pool-count");
   const summaryEnclosureCount = document.getElementById("summary-enclosure-count");
+  const summaryEnclosureSource = document.getElementById("summary-enclosure-source");
   const summaryMappedSlotCount = document.getElementById("summary-mapped-slot-count");
   const summaryManualMappingCount = document.getElementById("summary-manual-mapping-count");
   const summarySshSlotHintCount = document.getElementById("summary-ssh-slot-hint-count");
@@ -662,7 +663,7 @@
 
   function storageViewRuntimeTilePrimary(slot, selectedView) {
     if (!slot?.occupied) {
-      return selectedView?.kind === "nvme_carrier" ? "Unmapped slot" : "Empty";
+      return "Empty";
     }
     if (selectedView?.kind === "nvme_carrier" || selectedView?.kind === "boot_devices") {
       return slot.device_name || slot.serial || slot.pool_name || "Matched disk";
@@ -9681,9 +9682,25 @@
   function mappingSourceLabel(source) {
     const labels = {
       api: "TrueNAS API",
+      "api-slot": "TrueNAS API",
+      "api-slot-fallback": "TrueNAS API",
       ssh: "SSH (enclosure)",
+      "ses-slot-map": "SSH (enclosure)",
+      "device-name": "SSH (device name)",
+      "enclosure-sysfs": "SSH (enclosure driver)",
+      "ses-empty": "SSH (empty bay)",
+      "device-hint": "device name",
+      "serial-hint": "serial number",
+      "gptid-hint": "partition ID",
+      "sas-address": "SAS address",
       bmc: "BMC",
+      "bmc-slot": "BMC",
+      "storcli-slot": "StorCLI",
+      ubntstorage: "UniFi storage",
+      "system-inventory": "disk list",
+      synthetic_fixture: "demo data",
       manual: "saved assignment",
+      import: "imported assignment",
       modeled: "modeled layout",
       inventory_candidate: "inventory match",
       snapshot_slot: "saved snapshot",
@@ -9720,6 +9737,31 @@
     return null;
   }
 
+  // The snapshot's locate card describes the enclosure. A storage view such
+  // as an NVMe carrier or boot devices, where no slot has a light, says so
+  // instead of repeating it (#950). Chassis views keep the card as reported.
+  function locateCapabilityForView(capability, view) {
+    if (!capability || !view || isLiveStyledStorageView(view)) {
+      return capability;
+    }
+    const slots = Array.isArray(view.slots) ? view.slots : [];
+    if (slots.some((slot) => slot?.led_supported)) {
+      return capability;
+    }
+    return { ...capability, status: "unsupported", summary: "This view has no bay lights." };
+  }
+
+  // Where the Enclosures count came from; the template keeps the same map.
+  function enclosureSourceNote(source) {
+    return ({
+      truenas: "reported by TrueNAS",
+      ssh: "found over SSH",
+      truenas_and_ssh: "reported by TrueNAS and found over SSH",
+      quantastor: "reported by QuantaStor",
+      layout: "from the enclosure layout",
+    })[String(source || "")] || "reported by TrueNAS";
+  }
+
   function capabilityStatusLabel(status) {
     return ({
       available: "Available",
@@ -9739,11 +9781,18 @@
       return;
     }
     const capabilities = state.snapshot.capabilities || {};
+    const selectedView = getSelectedStorageViewRuntime();
     const entries = [
       { label: "Bay layout", aliases: ["physical_slots", "physical_slot_mapping", "bay_layout"] },
       { label: "SMART details", aliases: ["smart_detail", "smart_details", "smart"] },
-      { label: "Locate light", aliases: ["identify", "identify_leds", "locate_light", "locate"] },
-    ].map((definition) => ({ ...definition, capability: capabilityEntry(capabilities, definition.aliases) }))
+      { label: "Locate light", aliases: ["identify", "identify_leds", "locate_light", "locate"], perView: true },
+    ].map((definition) => {
+      const capability = capabilityEntry(capabilities, definition.aliases);
+      return {
+        ...definition,
+        capability: definition.perView ? locateCapabilityForView(capability, selectedView) : capability,
+      };
+    })
       .filter((entry) => entry.capability);
     capabilitiesPanel.classList.toggle("hidden", entries.length === 0);
     capabilitiesGrid.replaceChildren(...entries.map((entry) => {
@@ -9772,6 +9821,9 @@
     summaryDiskCount.textContent = String(summary.disk_count ?? 0);
     summaryPoolCount.textContent = String(summary.pool_count ?? 0);
     summaryEnclosureCount.textContent = String(summary.enclosure_count ?? 0);
+    if (summaryEnclosureSource) {
+      setTextIfChanged(summaryEnclosureSource, enclosureSourceNote(summary.enclosure_source));
+    }
     summaryMappedSlotCount.textContent = String(summary.mapped_slot_count ?? 0);
     summaryManualMappingCount.textContent = String(summary.manual_mapping_count ?? 0);
     summarySshSlotHintCount.textContent = String(summary.ssh_slot_hint_count ?? 0);
