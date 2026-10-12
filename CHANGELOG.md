@@ -39,6 +39,11 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 - CORE SSH stopped stacking separate backplanes and AHCI SGPIO ports into one
   shelf drawn as the 60-bay CSE-946, and read pool names without the API
   (#955).
+- The TrueNAS CORE one-time bootstrap ran its script through
+  `/bin/sh -lc` and created missing users with `pw useradd`. It now sends the
+  script on stdin, stops before any change when the CORE account is missing or
+  its home is not under `/mnt`, and stores SMART grants that still match after
+  the middleware escapes commas (#957).
 
 ## v0.24.0-beta.3 - 2026-10-11
 
