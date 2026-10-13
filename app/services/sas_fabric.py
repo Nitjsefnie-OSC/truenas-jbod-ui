@@ -2995,17 +2995,30 @@ def _scope_mpr_infrastructure(
         link.target: link.source for link in links.values() if link.kind == "expander-expander"
     }
     context_node_ids = set(scoped_node_ids)
-    pending = [node for node in nodes.values() if node.kind == "expander" and node.related_slots]
+    # Parent links are already admitted as unique, level-consistent chains by
+    # _mpr_expander_parent_context. Process children before parents so each
+    # edge contributes its complete slot set once, not once per arriving leaf.
+    slot_sets = {node.id: set(node.related_slots) for node in nodes.values() if node.kind == "expander"}
+    child_counts = dict.fromkeys(slot_sets, 0)
+    for child_id, parent_id in upstream_by_target.items():
+        if child_id in slot_sets and parent_id in slot_sets:
+            child_counts[parent_id] += 1
+    pending = [node_id for node_id, count in child_counts.items() if count == 0]
+    updated_node_ids: set[str] = set()
     while pending:
-        child = pending.pop()
-        parent = nodes.get(upstream_by_target.get(child.id, ""))
-        if parent is None:
+        child_id = pending.pop()
+        parent_id = upstream_by_target.get(child_id)
+        if parent_id not in slot_sets:
             continue
-        updated_slots = _dedupe_ints([*parent.related_slots, *child.related_slots])
-        if parent.id not in context_node_ids or updated_slots != parent.related_slots:
-            context_node_ids.add(parent.id)
-            parent.related_slots = updated_slots
-            pending.append(parent)
+        if slot_sets[child_id]:
+            slot_sets[parent_id].update(slot_sets[child_id])
+            context_node_ids.add(parent_id)
+            updated_node_ids.add(parent_id)
+        child_counts[parent_id] -= 1
+        if child_counts[parent_id] == 0:
+            pending.append(parent_id)
+    for node_id in updated_node_ids:
+        nodes[node_id].related_slots = sorted(slot_sets[node_id])
 
     for controller_id, slots in controller_slot_updates.items():
         controller = nodes.get(controller_id)
