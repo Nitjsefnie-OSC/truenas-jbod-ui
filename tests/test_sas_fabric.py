@@ -53,6 +53,7 @@ from app.services.sas_fabric import (
     CORE_PCICONF_LV_OPTIONAL_COMMAND,
     _PLATFORM_STORAGE_ROUTE_PROVIDERS,
     _SAS_FABRIC_BUILDERS,
+    _add_mpr_infrastructure,
     _build_sas_fabric_context,
     _build_storage_fabric_route_context,
     _device_name_candidates,
@@ -356,6 +357,140 @@ Slots Logical ID       SEPHandle EncHandle Type
 24    50030480090c4f7f 0018      0012     SES
 60    500304801f715f3f 001a      0014     SES
 """.strip()
+
+
+class MprExpanderCascadeTests(unittest.TestCase):
+    @staticmethod
+    def _expander(handle="000a", parent="0001", level="1", name="A", enclosure="0002"):
+        return {
+            "dev_handle": handle, "parent": parent, "sas_level": level,
+            "sas_address": f"SANITIZED-EXPANDER-{name}", "enc_handle": enclosure,
+            "num_phys": "36", "linked_phys": 0, "phys": [],
+        }
+
+    def _infrastructure(self, rows_by_unit):
+        nodes, links = {}, {}
+        _add_mpr_infrastructure(
+            nodes=nodes, links=links,
+            controllers=[{"unit": unit, "id": f"controller:mpr{unit}"} for unit in rows_by_unit],
+            unit_data={unit: {"expanders": rows} for unit, rows in rows_by_unit.items()},
+        )
+        return nodes, list(links.values())
+
+    @staticmethod
+    def _id(name, unit=0):
+        return f"expander:controller:mpr{unit}:SANITIZED-EXPANDER-{name}"
+
+    def test_cascade_uses_parent_handle_in_either_enumeration_order(self):
+        parent = self._expander()
+        child = self._expander("000b", "000a", "2", "B")
+        for rows in ([parent, child], [child, parent]):
+            with self.subTest(rows=rows):
+                nodes, links = self._infrastructure({0: rows})
+                self.assertEqual(
+                    {(link.source, link.target, link.kind) for link in links},
+                    {("controller:mpr0", self._id("A"), "controller-expander"),
+                     (self._id("A"), self._id("B"), "expander-expander")},
+                )
+                self.assertEqual(nodes[self._id("B")].raw["parent"], "000a")
+                self.assertEqual(nodes[self._id("B")].metrics["sas_level"], "2")
+                self.assertEqual(nodes[self._id("B")].evidence, ["mprutil -u 0 show expanders"])
+                self.assertTrue(all(link.evidence == ["mprutil -u 0 show expanders"] for link in links))
+
+    def test_handles_are_controller_qualified(self):
+        _, links = self._infrastructure({
+            0: [self._expander(), self._expander("000b", "000a", "2", "B")],
+            1: [self._expander(name="C"), self._expander("000b", "000a", "2", "D")],
+        })
+        self.assertEqual(
+            {(link.source, link.target) for link in links if link.kind == "expander-expander"},
+            {(self._id("A"), self._id("B")), (self._id("C", 1), self._id("D", 1))},
+        )
+        _, links = self._infrastructure({0: [self._expander()], 1: [self._expander("000b", "000a", "2", "B")]})
+        self.assertFalse(any(link.target == self._id("B", 1) for link in links))
+
+    def test_direct_attached_positive_case_and_case_insensitive_handle(self):
+        _, links = self._infrastructure({0: [self._expander(), self._expander("000b", "000A", "2", "B")]})
+        self.assertEqual(len(links), 2)
+        self.assertIn((self._id("A"), self._id("B")), {(link.source, link.target) for link in links})
+
+    def test_unresolved_and_missing_parent_do_not_fall_back_to_hba(self):
+        for parent in ("000f", None, ""):
+            with self.subTest(parent=parent):
+                nodes, links = self._infrastructure({0: [self._expander("000b", parent, "2", "B")]})
+                self.assertEqual(links, [])
+                self.assertEqual(nodes[self._id("B")].raw["parent_link_state"], "unknown")
+
+    def test_duplicate_handle_or_address_blocks_ambiguous_edges_and_descendants(self):
+        parent = self._expander()
+        for duplicate in (dict(parent), self._expander(name="C"), self._expander("000c")):
+            for rows in ([parent, duplicate], [duplicate, parent]):
+                with self.subTest(rows=rows):
+                    _, links = self._infrastructure({0: [*rows, self._expander("000b", "000a", "2", "B")]})
+                    self.assertEqual(links, [])
+
+    def test_cycles_self_parent_and_contradictory_levels_have_no_edges(self):
+        cases = (
+            [self._expander(parent="000a")],
+            [self._expander(parent="000b"), self._expander("000b", "000a", "2", "B")],
+            [self._expander(), self._expander("000b", "000a", "1", "B")],
+            [self._expander(), self._expander("000b", "000a", "3", "B")],
+            [self._expander(level="0")],
+            [self._expander(level=None)],
+        )
+        for rows in cases:
+            with self.subTest(rows=rows):
+                _, links = self._infrastructure({0: rows})
+                # An independent valid root is still admitted.
+                expected = 1 if len(rows) == 2 and rows[0]["parent"] == "0001" else 0
+                self.assertEqual(len(links), expected)
+
+    def test_invalid_ancestor_does_not_certify_downstream_connectivity(self):
+        _, links = self._infrastructure({0: [
+            self._expander(parent="000f", level="2"),
+            self._expander("000b", "000a", "3", "B"),
+        ]})
+        self.assertEqual(links, [])
+
+    def test_deeper_cascade_is_resolved_without_order_dependence(self):
+        _, links = self._infrastructure({0: [
+            self._expander("000c", "000b", "3", "C"),
+            self._expander("000b", "000a", "2", "B"), self._expander(),
+        ]})
+        self.assertEqual(len(links), 3)
+        self.assertEqual(sum(link.kind == "expander-expander" for link in links), 2)
+
+    def test_public_builder_retains_only_verified_ancestors_of_selected_enclosure(self):
+        # Invented identifiers, formatted to the parser's wire shape.
+        addresses = {name: f"{number:016x}" for number, name in enumerate("ABC", 10)}
+        rows = [
+            f"36 {addresses['B']} 000b 000a 0003 2",
+            f"36 {addresses['C']} 000c 0001 0004 1",
+            f"36 {addresses['A']} 000a 0001 0002 1",
+        ]
+        slot = SlotView(slot=0, slot_label="00", row_index=0, column_index=0, present=False, state=SlotState.empty)
+        snapshot = InventorySnapshot(
+            slots=[slot], refresh_interval_seconds=30, selected_system_platform="core",
+            selected_enclosure_id=addresses["B"],
+        )
+        fabric = build_sas_fabric_snapshot(
+            system=SystemConfig(id="synthetic-core", label="Synthetic CORE", truenas=TrueNASConfig(platform="core")),
+            snapshot=snapshot,
+            ssh_outputs={"mprutil -u 0 show expanders": "\n".join(rows)},
+        )
+        nodes = {node.id: node for node in fabric.nodes}
+        parent_id = f"expander:controller:mpr0:{addresses['A']}"
+        child_id = f"expander:controller:mpr0:{addresses['B']}"
+        self.assertIn(parent_id, nodes)
+        self.assertIn(child_id, nodes)
+        self.assertNotIn(f"expander:controller:mpr0:{addresses['C']}", nodes)
+        self.assertEqual(nodes[parent_id].raw["fabric_scope"], "unscoped")
+        self.assertFalse(nodes[parent_id].raw["selected_enclosure_candidate"])
+        self.assertEqual(nodes[child_id].raw["fabric_scope"], "selected_enclosure")
+        self.assertEqual(nodes[parent_id].related_slots, [0])
+        self.assertIn((parent_id, child_id, "expander-expander"), {(link.source, link.target, link.kind) for link in fabric.links})
+        self.assertNotIn(("controller:mpr0", child_id, "controller-expander"), {(link.source, link.target, link.kind) for link in fabric.links})
+        self.assertFalse(any(link.kind.endswith("-bay") and link.source == parent_id for link in fabric.links))
 
 
 class SasFabricParserTests(unittest.TestCase):
