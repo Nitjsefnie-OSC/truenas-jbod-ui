@@ -36,6 +36,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Storage Fabric linked cascaded MPR expanders through unique, consistent
+  reported parents instead of flattening them onto the controller; missing
+  or conflicting parent evidence stayed unknown (#970).
 - CORE SSH stopped stacking separate backplanes and AHCI SGPIO ports into one
   shelf drawn as the 60-bay CSE-946, and read pool names without the API
   (#955).
