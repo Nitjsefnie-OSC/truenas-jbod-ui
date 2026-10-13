@@ -361,7 +361,7 @@ Slots Logical ID       SEPHandle EncHandle Type
 
 class MprExpanderCascadeTests(unittest.TestCase):
     @staticmethod
-    def _expander(handle="000a", parent="0001", level="1", name="A", enclosure="0002"):
+    def _expander(handle="000a", parent: str | None = "0001", level: str | None = "1", name="A", enclosure="0002"):
         return {
             "dev_handle": handle, "parent": parent, "sas_level": level,
             "sas_address": f"SANITIZED-EXPANDER-{name}", "enc_handle": enclosure,
@@ -437,6 +437,7 @@ class MprExpanderCascadeTests(unittest.TestCase):
             [self._expander(), self._expander("000b", "000a", "3", "B")],
             [self._expander(level="0")],
             [self._expander(level=None)],
+            [self._expander(level="9" * 5000)],
         )
         for rows in cases:
             with self.subTest(rows=rows):

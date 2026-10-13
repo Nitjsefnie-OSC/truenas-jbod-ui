@@ -2795,6 +2795,56 @@ def _mpr_evidence(unit: int, subcommand: str) -> list[str]:
     return [f"mprutil -u {unit} show {subcommand}"] if unit >= 0 else [f"mprutil show {subcommand}"]
 
 
+def _mpr_expander_parent_context(
+    expanders: list[dict[str, Any]], controller_id: str,
+) -> list[tuple[str | None, str]]:
+    """Admit only unique, level-consistent chains rooted at this controller.
+
+    Handles are local to one MPR unit. A level-1 row proves direct attachment
+    only when its parent is not another observed expander. Missing or conflicting
+    evidence never becomes an HBA fallback, including for descendants.
+    """
+    handles = [str(row.get("dev_handle") or "").lower() for row in expanders]
+    identities = [str(row.get("sas_address") or row.get("dev_handle") or "").lower() for row in expanders]
+    handle_counts, identity_counts = Counter(handles), Counter(identities)
+    by_handle = {handle: index for index, handle in enumerate(handles) if handle_counts[handle] == 1}
+    levels = [
+        int(value) if len(value) <= 10 and re.fullmatch(r"[0-9]+", value) else 0
+        for row in expanders
+        for value in [str(row.get("sas_level") or "")]
+    ]
+    result: list[tuple[str | None, str]] = [(None, "unknown") for _ in expanders]
+    # Increasing levels make admission independent of source enumeration and
+    # ensure a cycle cannot be admitted. No recursive traversal of source data.
+    for index in sorted(range(len(expanders)), key=lambda item: levels[item]):
+        row = expanders[index]
+        parent = str(row.get("parent") or "").lower()
+        if not handles[index] or handle_counts[handles[index]] != 1 or identity_counts[identities[index]] != 1:
+            reason = "ambiguous_identity"
+        elif levels[index] < 1:
+            reason = "invalid_level"
+        elif not parent:
+            reason = "missing_parent"
+        elif levels[index] == 1 and parent not in handle_counts:
+            result[index] = (controller_id, "resolved")
+            continue
+        elif parent not in by_handle:
+            reason = "unresolved_parent"
+        else:
+            parent_index = by_handle[parent]
+            if levels[parent_index] != levels[index] - 1:
+                reason = "contradictory_parent_level"
+            elif result[parent_index][0] is None:
+                reason = "upstream_unresolved"
+            else:
+                parent_row = expanders[parent_index]
+                parent_id = f"expander:{controller_id}:{parent_row.get('sas_address') or parent_row.get('dev_handle')}"
+                result[index] = (parent_id, "resolved")
+                continue
+        result[index] = (None, reason)
+    return result
+
+
 def _add_mpr_infrastructure(
     *,
     nodes: dict[str, SasFabricNode],
@@ -2819,7 +2869,9 @@ def _add_mpr_infrastructure(
         }
         selected_enc_handles.discard("")
         expander_ids_by_enc_handle: dict[str, list[str]] = defaultdict(list)
-        for expander in payload.get("expanders") or []:
+        expanders = payload.get("expanders") or []
+        parent_context = _mpr_expander_parent_context(expanders, controller_id)
+        for expander, (parent_id, parent_reason) in zip(expanders, parent_context, strict=True):
             expander_id = f"expander:{controller_id}:{expander.get('sas_address') or expander.get('dev_handle')}"
             expander_key = _identifier_lookup_key(expander.get("sas_address"))
             enc_handle = str(expander.get("enc_handle") or "")
@@ -2834,6 +2886,8 @@ def _add_mpr_infrastructure(
                 "selected_enclosure_candidate": selected_candidate,
                 "fabric_scope": "selected_enclosure" if selected_candidate else "unscoped",
                 **expander,
+                "parent_link_state": "resolved" if parent_id else "unknown",
+                "parent_link_reason": parent_reason,
             }
             add_node(
                 nodes,
@@ -2852,7 +2906,12 @@ def _add_mpr_infrastructure(
                     raw=raw,
                 ),
             )
-            add_link(links, controller_id, expander_id, "controller-expander")
+            if parent_id:
+                add_link(
+                    links, parent_id, expander_id,
+                    "controller-expander" if parent_id == controller_id else "expander-expander",
+                    evidence=_mpr_evidence(unit, "expanders"),
+                )
             if enc_handle:
                 expander_ids_by_enc_handle[enc_handle].append(expander_id)
 
@@ -2929,6 +2988,25 @@ def _scope_mpr_infrastructure(
         if node.controller_id:
             controller_slot_updates[node.controller_id].extend(node.related_slots)
 
+    # Keep verified upstream context for selected expanders, not their siblings
+    # or enclosures. Related bays describe reachability here, not bay identity
+    # or membership in the selected enclosure.
+    upstream_by_target = {
+        link.target: link.source for link in links.values() if link.kind == "expander-expander"
+    }
+    context_node_ids = set(scoped_node_ids)
+    pending = [node for node in nodes.values() if node.kind == "expander" and node.related_slots]
+    while pending:
+        child = pending.pop()
+        parent = nodes.get(upstream_by_target.get(child.id, ""))
+        if parent is None:
+            continue
+        updated_slots = _dedupe_ints([*parent.related_slots, *child.related_slots])
+        if parent.id not in context_node_ids or updated_slots != parent.related_slots:
+            context_node_ids.add(parent.id)
+            parent.related_slots = updated_slots
+            pending.append(parent)
+
     for controller_id, slots in controller_slot_updates.items():
         controller = nodes.get(controller_id)
         if not controller:
@@ -2942,7 +3020,7 @@ def _scope_mpr_infrastructure(
         source = nodes.get(link.source)
         target = nodes.get(link.target)
         related_slots = _dedupe_ints([*(source.related_slots if source else []), *(target.related_slots if target else [])])
-        if not link.related_slots and (link.source in scoped_node_ids or link.target in scoped_node_ids):
+        if not link.related_slots and (link.source in context_node_ids or link.target in context_node_ids):
             link.related_slots = related_slots or list(selected_bay_slots)
         if link.kind == "host-controller" and link.target in controller_slot_updates:
             link.related_slots = _dedupe_ints([*link.related_slots, *controller_slot_updates[link.target]])
