@@ -36,6 +36,8 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- History shutdown interrupted a deferred index build without discarding completed
+  indexes, and the next start resumed only the missing indexes (#994).
 - The CORE locate readback followed the element id instead of borrowing
   the bay numbered like it when the target element's description was not
   recognised, so it no longer confirms another drive's light (#984).
