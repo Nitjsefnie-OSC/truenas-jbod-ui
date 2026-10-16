@@ -352,7 +352,7 @@ class ImmutableDeploymentTests(unittest.TestCase):
             message = str(caught.exception)
             self.assertEqual(
                 message,
-                "activation failed (health probe did not converge: http://127.0.0.1:8081); "
+                "activation failed (health probe did not converge: [redacted-url]); "
                 "automatic rollback completed",
             )
             self.assertNotIn("SYNTH-SECRET", message)
@@ -364,16 +364,164 @@ class ImmutableDeploymentTests(unittest.TestCase):
             "container enclosure-history is unhealthy",
         )
         self.assertEqual(len(deployment._failure_summary(deployment.DeploymentError("x" * 1000))), 300)
-        # A quoted URL keeps only scheme, host and port.
+        # No part of a URL can be trusted as a host in an error summary.
         self.assertEqual(
             deployment._failure_summary(deployment.DeploymentError(
                 "health probe did not converge: http://user:pw@127.0.0.1:8081/healthz?token=SYNTH-SECRET#frag"
             )),
-            "health probe did not converge: http://127.0.0.1:8081",
+            "health probe did not converge: [redacted-url]",
         )
         # Arbitrary exceptions can carry paths or payloads; only the type is shown.
         self.assertEqual(deployment._failure_summary(ValueError("/secret/path token=abc")), "ValueError")
         self.assertEqual(deployment._failure_summary(KeyboardInterrupt()), "KeyboardInterrupt")
+
+    def test_failure_summary_redacts_entire_url_tokens_without_parsing_authorities(self) -> None:
+        urls = (
+            "https://SYNTH-USER:SYNTH-PA/SS@host.example.test/x",
+            "https://SYNTH-USER:SYNTH-PA?SS@host.example.test/x",
+            "https://SYNTH-USER:SYNTH-PA#SS@host.example.test/x",
+            "https://SYNTH-USER:SYNTH%2FPA%40SS@host.example.test/x",
+            "https://SYNTH-USER%3ASYNTH-PASS%40host.example.test/x",
+            "https://SYNTH-USER:SYNTH-PASS",
+            "https://[invalid/SYNTH-PASS",
+            "https:///SYNTH-PASS?token=SYNTH-TOKEN#SYNTH-FRAGMENT",
+            "https://host.example.test/SYNTH-PASS?token=SYNTH-TOKEN#SYNTH-FRAGMENT",
+            "https%3A%2F%2FSYNTH-USER%3ASYNTH-PASS%40host.example.test/x",
+            "HTTPS:/SYNTH-USER:SYNTH-PASS@host.example.test",
+            "https:SYNTH-PASS",
+        )
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(
+                    deployment._failure_summary(deployment.DeploymentError(f"failed: {url} next step")),
+                    "failed: [redacted-url] next step",
+                )
+
+    def test_failure_summary_redacts_multiple_urls_and_preserves_non_url_text(self) -> None:
+        self.assertEqual(
+            deployment._failure_summary(deployment.DeploymentError(
+                "failed https://SYNTH-USER:SYNTH-PASS@host.example.test/x then "
+                "ssh://SYNTH-USER:SYNTH-PA/SS@other.example.test/x exit=2"
+            )),
+            "failed [redacted-url] then [redacted-url] exit=2",
+        )
+        self.assertEqual(
+            deployment._failure_summary(deployment.DeploymentError("count:33 /local/path retry=5")),
+            "count:33 /local/path retry=5",
+        )
+
+    def test_retention_scope_too_large_http_body_is_named_without_retrying(self) -> None:
+        body = io.BytesIO(json.dumps({
+            "error": "retention_scope_too_large", "enclosure_count_minimum": 33,
+            "enclosure_cap": 32, "detail": "SYNTH-PRIVATE-DETAIL",
+        }).encode())
+        error = urllib.error.HTTPError(
+            "http://127.0.0.1:8080/api/inventory", 503, "Unavailable",
+            email.message.Message(), body,
+        )
+        with (
+            mock.patch.object(deployment.urllib.request, "build_opener") as opener,
+            mock.patch.object(deployment.time, "sleep") as sleep,
+        ):
+            opener.return_value.open.side_effect = error
+            with self.assertRaisesRegex(
+                deployment.DeploymentError,
+                "retention scope too large: at least 33 enclosure options exceeds cap 32",
+            ) as caught:
+                deployment._retention_totals(deployment._default_fetch_json, error.url)
+            sleep.assert_not_called()
+            opener.return_value.open.assert_called_once()
+        self.assertTrue(body.closed)
+        self.assertNotIn("SYNTH-PRIVATE-DETAIL", str(caught.exception))
+        self.assertNotIsInstance(caught.exception, deployment.InventoryBusy)
+
+    def test_retention_error_body_is_bounded_and_never_echoed(self) -> None:
+        typed = {"error": "retention_scope_too_large", "detail": "SYNTH-PRIVATE-DETAIL"}
+        cases = (
+            (json.dumps({**typed, "enclosure_count_minimum": True, "enclosure_cap": 32}).encode(), True),
+            (json.dumps({**typed, "enclosure_count_minimum": 33, "enclosure_cap": "SYNTH-PRIVATE"}).encode(), True),
+            (json.dumps({**typed, "enclosure_count_minimum": 32, "enclosure_cap": 33}).encode(), True),
+            (json.dumps({**typed, "enclosure_count_minimum": 2**64, "enclosure_cap": 32}).encode(), True),
+            (b'{"error": "retention_scope_too_large"', False),
+            (b'\xff', False),
+            (b'[]', False),
+            (b'[' * 1500 + b']' * 1500, False),
+            (b'{"detail": "SYNTH-PRIVATE-DETAIL"}', False),
+            (json.dumps(typed).encode() + b' ' * deployment.MAX_RETENTION_ERROR_BYTES, False),
+        )
+        for raw, is_typed in cases:
+            with self.subTest(raw=raw[:60]):
+                body = io.BytesIO(raw)
+                read = mock.Mock(wraps=body.read)
+                body.read = read
+                error = urllib.error.HTTPError(
+                    "http://127.0.0.1:8080/api/inventory", 503, "Unavailable",
+                    email.message.Message(), body,
+                )
+                with mock.patch.object(deployment.urllib.request, "build_opener") as opener:
+                    opener.return_value.open.side_effect = error
+                    with self.assertRaises(deployment.DeploymentError) as caught:
+                        deployment._default_fetch_json(error.url)
+                expected = "inventory retention scope too large" if is_typed else (
+                    "inventory retention check could not read the inventory"
+                )
+                self.assertEqual(str(caught.exception), expected)
+                self.assertTrue(body.closed)
+                read.assert_called_once_with(deployment.MAX_RETENTION_ERROR_BYTES + 1)
+
+    def test_numeric_retry_after_keeps_precedence_and_does_not_read_error_body(self) -> None:
+        for retry_after in ("0", "5", " 30 "):
+            with self.subTest(retry_after=retry_after):
+                body = io.BytesIO(b'{"error": "retention_scope_too_large"}')
+                read = mock.Mock(wraps=body.read)
+                body.read = read
+                headers = email.message.Message()
+                headers["Retry-After"] = retry_after
+                error = urllib.error.HTTPError(
+                    "http://127.0.0.1:8080/api/inventory", 503, "Unavailable", headers, body,
+                )
+                with mock.patch.object(deployment.urllib.request, "build_opener") as opener:
+                    opener.return_value.open.side_effect = error
+                    with self.assertRaises(deployment.InventoryBusy) as caught:
+                        deployment._default_fetch_json(error.url)
+                self.assertEqual(caught.exception.retry_after_seconds, int(retry_after))
+                read.assert_not_called()
+                self.assertTrue(body.closed)
+
+    def test_over_cap_before_refuses_and_after_rolls_back_without_bypass(self) -> None:
+        totals = {"summary": {key: 0 for key in deployment.RETENTION_KEYS}}
+        for baseline_over_cap in (True, False):
+            with self.subTest(baseline_over_cap=baseline_over_cap), tempfile.TemporaryDirectory() as directory:
+                root = self.make_root(directory)
+                previous = (root / ".env").read_bytes()
+                runtime = FakeRuntime(root)
+                spec = deployment.DeploymentSpec(**{
+                    **self.make_spec(root).__dict__,
+                    "inventory_url": "http://127.0.0.1:8080/api/inventory",
+                })
+                over_cap = deployment.RetentionScopeTooLarge({
+                    "enclosure_count_minimum": 33, "enclosure_cap": 32,
+                })
+                answers = [over_cap] if baseline_over_cap else [totals, over_cap]
+
+                def fetch(url: str) -> object:
+                    answer = answers.pop(0)
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return answer
+
+                with self.assertRaisesRegex(deployment.DeploymentError, "retention scope too large") as caught:
+                    deployment.update_deployment(
+                        spec, run=runtime.run, probe=runtime.probe, fetch_json=fetch,
+                    )
+                self.assertEqual(runtime.active_image_id, OLD_IMAGE_ID)
+                if baseline_over_cap:
+                    self.assertEqual((root / ".env").read_bytes(), previous)
+                    self.assertFalse((root / deployment.RECEIPT_DIR_NAME).exists())
+                    self.assertFalse(any(command[:2] == ("docker", "pull") for command in runtime.commands))
+                else:
+                    self.assertIn("automatic rollback completed", str(caught.exception))
+                    self.assertEqual(deployment.validate_receipt(root)["status"], "rolled_back")
 
     def test_candidate_tag_mismatch_fails_before_receipt_or_live_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
