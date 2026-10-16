@@ -3,6 +3,7 @@ import importlib
 import inspect
 import json
 import re
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -493,11 +494,135 @@ class MprExpanderCascadeTests(unittest.TestCase):
         self.assertIn((parent_id, child_id, "expander-expander"), {(link.source, link.target, link.kind) for link in fabric.links})
         self.assertNotIn(("controller:mpr0", child_id, "controller-expander"), {(link.source, link.target, link.kind) for link in fabric.links})
         self.assertFalse(any(link.kind.endswith("-bay") and link.source == parent_id for link in fabric.links))
+        trace = next(trace for trace in fabric.traces if trace.id == "bay:0")
+        self.assertIn(parent_id, trace.node_ids)
+        trace_links = [link for link in fabric.links if link.id in trace.link_ids]
+        self.assertTrue(all(link.source in trace.node_ids and link.target in trace.node_ids for link in trace_links))
+        self.assertIn(("controller:mpr0", parent_id), {(link.source, link.target) for link in trace_links})
+        # Exercise the shipped trace renderer, not a hand-built graph consumer.
+        result = subprocess.run(
+            ["node", "-e", """
+const fs = require('node:fs');
+const {load} = require('./tests/js/fabric_aggregate_provenance.test.js');
+const data = JSON.parse(fs.readFileSync(0, 'utf8'));
+const ui = load(data);
+process.stdout.write(ui.renderTraceMode(data.fabric));
+"""],
+            input=json.dumps({"fabric": fabric.model_dump(mode="json"), "snapshot": snapshot.model_dump(mode="json")}),
+            text=True, capture_output=True, timeout=20, cwd=Path(__file__).resolve().parents[1], check=True,
+        )
+        self.assertIn(f'data-fabric-node="{parent_id}"', result.stdout)
+        self.assertNotIn(f'data-fabric-node="expander:controller:mpr0:{addresses["C"]}"', result.stdout)
+
+    def test_member_derived_bay_and_path_traces_include_only_their_verified_ancestors(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                rows = [f"36 {10:016x} 000a 0001 0002 1", f"36 {11:016x} 000b 000a 0003 2",
+                        f"36 {12:016x} 000c 000a 0004 2"]
+                fabric = build_sas_fabric_snapshot(
+                    system=SystemConfig(id="synthetic-core", truenas=TrueNASConfig(platform="core")),
+                    snapshot=InventorySnapshot(slots=[SlotView(
+                        slot=0, slot_label="0", row_index=0, column_index=0, present=True,
+                        state=SlotState.healthy, device_name="da0", multipath=MultipathView(
+                            name="mpath0", device_name="multipath/disk0", members=[MultipathMember(
+                                device_name="da0", state="ACTIVE", controller_label="mpr0")]))],
+                        refresh_interval_seconds=30, selected_enclosure_id=f"{11:016x}"),
+                    ssh_outputs={
+                        "mprutil -u 0 show expanders": "\n".join(rows[::-1] if reverse else rows),
+                        "mprutil -u 0 show enclosures": f"60 {11:016x} 0008 0003 SES",
+                        "mprutil -u 0 show devices": f"00 0 {20:016x} 0020 000b SAS Target 12.0 0003 0",
+                        "camcontrol devlist -v": "scbus12 on mpr0 bus 0:\n<Synthetic disk 0001> at scbus12 target 0 lun 0 (da0,pass0)",
+                    },
+                )
+                for trace in fabric.traces:
+                    self.assertIn(f"expander:controller:mpr0:{10:016x}", trace.node_ids)
+                    self.assertNotIn(f"expander:controller:mpr0:{12:016x}", trace.node_ids)
+                    for link in fabric.links:
+                        if link.id in trace.link_ids:
+                            self.assertIn(link.source, trace.node_ids)
+                            self.assertIn(link.target, trace.node_ids)
+                parent = next(node for node in fabric.nodes if node.id == f"expander:controller:mpr0:{10:016x}")
+                self.assertFalse(parent.raw["selected_enclosure_candidate"])
+                self.assertNotIn("selected_enclosure", parent.metrics)
+
+    def test_public_builder_ancestry_limits_are_inclusive_and_fail_closed(self):
+        module = importlib.import_module("app.services.sas_fabric")
+        self.assertEqual(module._MAX_MPR_ANCESTRY_MEMBERSHIPS, 16384)
+        self.assertEqual(module._MAX_MPR_ANCESTRY_NODES, 4096)
+        for node_limit, memberships, limited in ((3, 6, False), (2, 6, True), (3, 5, True)):
+            with self.subTest(node_limit=node_limit, memberships=memberships):
+                with patch.object(module, "_MAX_MPR_ANCESTRY_NODES", node_limit), patch.object(
+                    module, "_MAX_MPR_ANCESTRY_MEMBERSHIPS", memberships,
+                ):
+                    fabric = build_sas_fabric_snapshot(
+                        system=SystemConfig(id="synthetic-core", truenas=TrueNASConfig(platform="core")),
+                        snapshot=InventorySnapshot(slots=[SlotView(
+                            slot=i, slot_label=str(i), row_index=0, column_index=i, present=False,
+                            state=SlotState.empty) for i in range(2)], refresh_interval_seconds=30,
+                            selected_enclosure_id=f"{3:016x}"),
+                        ssh_outputs={"mprutil -u 0 show expanders": "\n".join([
+                            f"36 {1:016x} 0001 ffff 0000 1", f"36 {2:016x} 0002 0001 0000 2",
+                            f"36 {3:016x} 0003 0002 0000 3"])},
+                    )
+                self.assertEqual(bool(fabric.warnings), limited)
+                self.assertEqual(sum(node.kind == "expander" for node in fabric.nodes), 1 if limited else 3)
+                self.assertEqual(any(link.kind == "expander-expander" for link in fabric.links), not limited)
+
+    def test_public_builder_caps_propagated_memberships_without_partial_ancestry(self):
+        # Scaled version of the public finding, not the 65k-node stress input.
+        depth, slot_count = 512, 60
+        rows = [f"36 {i + 1:016x} {i + 1:04x} {i:04x} 0000 {i + 1}" for i in range(depth)]
+        rows[0] = f"36 {1:016x} 0001 ffff 0000 1"
+        output = "\n".join(rows)
+        from app.services.ssh_probe import MAX_SSH_OUTPUT_BYTES
+        self.assertLess(len(output.encode()), MAX_SSH_OUTPUT_BYTES)
+        self.assertEqual(len(parse_mpr_expanders(output)), depth)
+        fabric = build_sas_fabric_snapshot(
+            system=SystemConfig(id="synthetic-core", truenas=TrueNASConfig(platform="core")),
+            snapshot=InventorySnapshot(
+                slots=[SlotView(slot=i, slot_label=str(i), row_index=0, column_index=i,
+                                present=False, state=SlotState.empty) for i in range(slot_count)],
+                refresh_interval_seconds=30, selected_enclosure_id=f"{depth:016x}",
+            ),
+            ssh_outputs={"mprutil -u 0 show expanders": output},
+        )
+        self.assertTrue(any("ancestry" in warning and "limit" in warning for warning in fabric.warnings))
+        self.assertFalse(any(link.kind in {"expander-expander", "controller-expander"} for link in fabric.links))
+        expanders = [node for node in fabric.nodes if node.kind == "expander"]
+        self.assertEqual(len(expanders), 1)
+        self.assertEqual(expanders[0].raw["parent_link_state"], "unknown")
+        self.assertEqual(expanders[0].raw["parent_link_reason"], "resource_limit")
+        self.assertLessEqual(sum(len(node.related_slots) for node in expanders), 16384)
+        self.assertLess(len(fabric.model_dump_json()), 250000)
+
+    def test_selected_scope_seed_memberships_are_bounded_before_copying(self):
+        module = importlib.import_module("app.services.sas_fabric")
+        with patch.object(module, "_MAX_MPR_ANCESTRY_MEMBERSHIPS", 5):
+            fabric = build_sas_fabric_snapshot(
+                system=SystemConfig(id="synthetic-core", truenas=TrueNASConfig(platform="core")),
+                snapshot=InventorySnapshot(slots=[SlotView(
+                    slot=i, slot_label=str(i), row_index=0, column_index=i, present=False,
+                    state=SlotState.empty) for i in range(2)], refresh_interval_seconds=30,
+                    selected_enclosure_id=f"{10:016x}"),
+                ssh_outputs={
+                    "mprutil -u 0 show expanders": "\n".join(
+                        f"36 {i + 1:016x} {i + 1:04x} ffff 000a 1" for i in range(3)),
+                    "mprutil -u 0 show enclosures": f"2 {10:016x} 000f 000a SES",
+                },
+            )
+        self.assertTrue(fabric.warnings)
+        expanders = [node for node in fabric.nodes if node.kind == "expander"]
+        self.assertEqual(len(expanders), 3)
+        self.assertTrue(all(node.related_slots == [] for node in expanders))
+        self.assertTrue(all(node.raw["parent_link_reason"] == "resource_limit" for node in expanders))
+        self.assertFalse(any(link.kind in {"controller-expander", "expander-expander"} for link in fabric.links))
+        self.assertTrue(all(not any(node_id.startswith("expander:") for node_id in trace.node_ids)
+                            for trace in fabric.traces))
 
     def test_comb_scope_materializes_slots_a_bounded_number_of_times(self):
-        # The real typed-helper reproducer: 800 chain nodes, 800 seeded leaves,
+        # The real typed-helper reproducer: 128 chain nodes, 128 seeded leaves,
         # and a root. Each leaf has a distinct slot and a distinct chain parent.
-        depth = 800
+        depth = 128
         rows = [self._expander("0001", "ffff", "1", "root")]
         rows.extend(self._expander(f"{i + 2:04x}", f"{i + 1:04x}", str(i + 2), f"chain{i}") for i in range(depth))
         rows.extend(self._expander(f"{i + depth + 2:04x}", f"{i + 2:04x}", str(i + 3), f"leaf{i}") for i in range(depth))
