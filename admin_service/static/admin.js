@@ -3603,6 +3603,8 @@
     if (!elements.setupStorageViewEditor || !elements.setupStorageViewEmpty || !elements.setupStorageViewTemplateBadge) {
       return;
     }
+    state.storageViewEditorId = state.selectedStorageViewId;
+    state.storageViewEditorGeneration = state.setupEditorGeneration;
     if (!storageView) {
       elements.setupStorageViewEditor.classList.add("hidden");
       elements.setupStorageViewEmpty.classList.remove("hidden");
@@ -3864,8 +3866,13 @@
   }
 
   function saveStorageViewEditorToState() {
-    // Make sure the editor shows the selected view before reading it back.
-    flushStorageViewRender();
+    // A queued refresh of this same editor must not paint the old model over
+    // the change event's new values. Only a different view/system generation
+    // owns the right to replace these inputs before they are read back.
+    if (state.storageViewEditorId !== state.selectedStorageViewId
+      || state.storageViewEditorGeneration !== state.setupEditorGeneration) {
+      flushStorageViewRender();
+    }
     updateSelectedStorageView((storageView) => {
       const previousId = storageView.id;
       const editedLabel = String(elements.setupStorageViewLabel?.value || "");
@@ -3905,6 +3912,10 @@
           : null;
       return storageView.id;
     });
+    // Renaming updates selection before its deferred paint. Further changes in
+    // this task still belong to the editor that performed the rename.
+    state.storageViewEditorId = state.selectedStorageViewId;
+    state.storageViewEditorGeneration = state.setupEditorGeneration;
   }
 
   function currentStorageViewSystemId() {
