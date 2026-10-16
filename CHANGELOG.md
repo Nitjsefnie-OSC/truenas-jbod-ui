@@ -36,6 +36,10 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Locate light readback immediately updated bay tiles and restored their prior
+  state on clear, including cached views, and Connections Show all retained
+  keyboard focus on its heading (#998).
+
 - CORE SSH stopped stacking separate backplanes and AHCI SGPIO ports into one
   shelf drawn as the 60-bay CSE-946, and read pool names without the API
   (#955).
