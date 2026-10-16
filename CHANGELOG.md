@@ -40,6 +40,14 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   reported parents, retained verified ancestors in selected traces, and bounded
   propagated bay memberships; missing, conflicting or over-limit ancestry stayed
   unknown (#970).
+- The immutable upgrade helper removed complete URL tokens from failure
+  summaries and named over-cap retention refusals with bounded count/cap
+  evidence, while preserving refusal, rollback, and busy retries (#995).
+- History shutdown interrupted a deferred index build without discarding completed
+  indexes, and the next start resumed only the missing indexes (#994).
+- The CORE locate readback followed the element id instead of borrowing
+  the bay numbered like it when the target element's description was not
+  recognised, so it no longer confirms another drive's light (#984).
 - CORE SSH stopped stacking separate backplanes and AHCI SGPIO ports into one
   shelf drawn as the 60-bay CSE-946, and read pool names without the API
   (#955).
@@ -55,6 +63,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   exist yet. It now creates the account through `midclt call user.create` when
   the new Home directory field names a folder on a pool, and the unused
   bootstrap sudo-password field was removed (#960).
+- The TrueNAS CORE one-time bootstrap ignored an invalid Home directory field
+  for an existing account, while still refusing it before any host change when
+  account creation was needed (#993).
 - On TrueNAS CORE with SSH, the page no longer asked to turn on SSH when SSH
   had mapped the bays, named the real source of enclosures and bay positions,
   said "Empty" for an empty NVMe slot, did not offer locate lights on a view
