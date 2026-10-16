@@ -39,6 +39,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 - Locate light readback immediately updated bay tiles and restored their prior
   state on clear, including cached views, and Connections Show all retained
   keyboard focus on its heading (#998).
+- The immutable upgrade helper removed complete URL tokens from failure
+  summaries and named over-cap retention refusals with bounded count/cap
+  evidence, while preserving refusal, rollback, and busy retries (#995).
 - History shutdown interrupted a deferred index build without discarding completed
   indexes, and the next start resumed only the missing indexes (#994).
 - The CORE locate readback followed the element id instead of borrowing
