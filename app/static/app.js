@@ -10763,17 +10763,20 @@
         }
         const matchingSlot = snapshot.slots.find((item) => Number(item.slot) === Number(payload.slot));
         if (matchingSlot) {
-          // Retain the server's non-locate state on this snapshot, including
-          // fault/unknown/unmapped. JSON snapshot reuse must retain it too.
-          if (matchingSlot.state !== "identify") {
+          // Authoritative inventory wins over a locally retained legacy state,
+          // including after a refresh while locate is on. Never retain identify.
+          const baseStates = ["healthy", "fault", "empty", "unknown", "unmapped"];
+          const authoritative = baseStates.includes(matchingSlot.non_identify_state)
+            ? matchingSlot.non_identify_state : null;
+          if (baseStates.includes(matchingSlot.state)) {
             matchingSlot.state_before_identify = matchingSlot.state;
           }
           matchingSlot.identify_active = payload.identify_active;
           if (payload.identify_active) {
             matchingSlot.state = "identify";
           } else if (matchingSlot.state === "identify") {
-            // A page can first load with locate already on, so there may be
-            // no saved state. Use its observed presence and fault evidence.
+            // Legacy pre-lit snapshots can lack both base states. Presence is
+            // not enough to distinguish unknown/unmapped/healthy/empty bays.
             const raw = matchingSlot.raw_status || {};
             const health = [matchingSlot.health, raw.status, raw.value]
               .filter(Boolean).join(" ").toLowerCase().replaceAll("noncritical", "non-crit-code");
@@ -10784,8 +10787,10 @@
             const faulty = raw.ses_fault_sensed || raw.ses_fault_requested
               || /fault|degrad|fail|unavail|offline|removed|critical/.test(health)
               || /(?:^|[^a-z0-9])fault/.test(status);
-            matchingSlot.state = matchingSlot.state_before_identify
-              || (matchingSlot.present === false ? "empty" : faulty ? "fault" : matchingSlot.present ? "healthy" : "unknown");
+            const retained = baseStates.includes(matchingSlot.state_before_identify)
+              ? matchingSlot.state_before_identify : null;
+            matchingSlot.state = authoritative || retained
+              || (raw.present === false ? "empty" : faulty ? "fault" : "unknown");
           }
         }
         return snapshot;

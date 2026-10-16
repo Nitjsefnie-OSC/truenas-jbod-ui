@@ -57,15 +57,23 @@ for (const action of ["saveMapping", "clearMapping", "importMappingsFromFile"]) 
 }
 
 for (const initial of [
+  ...["unknown", "unmapped", "empty", "fault", "healthy"].map(non_identify_state => ({
+    state: "identify", present: false, non_identify_state, state_before_identify: "healthy", expected: non_identify_state,
+  })),
   {state: "healthy", present: true},
   {state: "fault", present: true},
   {state: "empty", present: false},
   {state: "unknown", present: true},
   {state: "unmapped", present: false},
   {state: "identify", present: true, health: "FAULTED", expected: "fault"},
-  {state: "identify", present: true, health: "ONLINE", expected: "healthy"},
-  {state: "identify", present: false, health: "CRITICAL", expected: "empty"},
-  {state: "identify", present: true, health: "Noncritical", expected: "healthy"},
+  {state: "identify", present: true, health: "ONLINE", expected: "unknown"},
+  {state: "identify", present: false, health: "CRITICAL", expected: "fault"},
+  {state: "identify", present: true, health: "Noncritical", expected: "unknown"},
+  ...[undefined, null, "identify", "bogus", false, {}, []].map(non_identify_state => ({
+    state: "identify", present: false, non_identify_state, state_before_identify: "identify", expected: "unknown",
+  })),
+  {state: "identify", present: false, raw_status: {present: false, status: "Critical"}, expected: "empty"},
+  {state: "identify", present: true, non_identify_state: "identify", state_before_identify: "unmapped", expected: "unmapped"},
   {state: "identify", present: true, raw_status: {ses_fault_sensed: true}, expected: "fault"},
   {state: "identify", present: true, raw_status: {state: "Fault"}, expected: "fault"},
 ]) {
