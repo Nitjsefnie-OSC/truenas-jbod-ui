@@ -56,6 +56,46 @@ for (const action of ["saveMapping", "clearMapping", "importMappingsFromFile"]) 
   }
 }
 
+for (const initial of [
+  {state: "healthy", present: true},
+  {state: "fault", present: true},
+  {state: "empty", present: false},
+  {state: "unknown", present: true},
+  {state: "unmapped", present: false},
+  {state: "identify", present: true, health: "FAULTED", expected: "fault"},
+  {state: "identify", present: true, health: "ONLINE", expected: "healthy"},
+  {state: "identify", present: false, health: "CRITICAL", expected: "empty"},
+  {state: "identify", present: true, health: "Noncritical", expected: "healthy"},
+  {state: "identify", present: true, raw_status: {ses_fault_sensed: true}, expected: "fault"},
+  {state: "identify", present: true, raw_status: {state: "Fault"}, expected: "fault"},
+]) {
+  test(`locate state readback restores ${initial.expected || initial.state}`, async () => {
+    const slot = {slot: 0, slot_label: "00", led_supported: true, identify_active: initial.state === "identify", ...initial};
+    const state = {
+      snapshotMode: false, snapshot: {selected_system_id: "a", selected_enclosure_id: "one", slots: [slot]},
+      selectedSystemId: "a", selectedEnclosureId: "one", selectedSlot: 0,
+      latestRefreshToken: 1, selectionEpoch: 0, mappingDraftRevision: 0,
+      snapshotReuseCache: {}, mutationsInFlight: {}, mutationResults: {},
+    };
+    let active = true;
+    const c = load(["cloneJsonValue", "snapshotReuseCacheKey", "snapshotUpdatedMs", ...guardNames, "sendLedAction"], {
+      state, URLSearchParams, writeBlockedByPolicy: () => false, getSlotById: () => state.snapshot.slots[0],
+      setStatus() {}, renderAll() {}, handleWriteRejection() {}, locateLightSourceLabel: () => "synthetic enclosure",
+      sendScopedRequest: async () => ({ok: true, slot: 0, requested_active: active, identify_active: active, confirmed: true}),
+    });
+    if (initial.state !== "identify") {
+      await c.sendLedAction("IDENTIFY");
+      assert.equal(slot.state, "identify");
+      // Reuse is a JSON copy, not a hidden reference to the original slot.
+      state.snapshot = structuredClone(state.snapshotReuseCache["a::one"]);
+    }
+    active = false;
+    await c.sendLedAction("CLEAR");
+    assert.equal(state.snapshot.slots[0].state, initial.expected || initial.state);
+    assert.equal(state.snapshotReuseCache["a::one"].slots[0].state, initial.expected || initial.state);
+  });
+}
+
 test("locate completion keeps and patches the originating result after a scope change", async () => {
   const pending = deferred();
   const statuses = [];
@@ -139,6 +179,10 @@ for (const outcome of ["confirmed", "unconfirmed", "failed"]) {
     const [message] = statuses.at(-1);
     assert.match(message, /^Synthetic System A \/ Shelf One: /);
     assert.match(message, /slot 00/);
+    const retained = state.snapshotReuseCache["a::one"];
+    if (outcome === "confirmed") assert.equal(retained.slots[0].state, "identify");
+    else if (outcome === "unconfirmed") assert.equal(retained.slots[0].identify_active, false);
+    else assert.equal(retained, undefined, "failed writes must not seed a locate cache");
   });
 }
 

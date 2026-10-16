@@ -2413,10 +2413,13 @@
       sasFabricRefreshButton.disabled = state.snapshotMode || state.sasFabric.loading;
     }
     if (sasFabricShowAllButton) {
-      sasFabricShowAllButton.classList.toggle(
-        "hidden",
-        !selectedSasFabricTrace() && !selectedSasFabricNode(),
-      );
+      const hideShowAll = !selectedSasFabricTrace() && !selectedSasFabricNode();
+      // The heading survives map rerenders. Move focus before hiding the
+      // activated control, including when a selected bay is cleared.
+      if (hideShowAll && state.sasFabric.open && document.activeElement === sasFabricShowAllButton) {
+        document.getElementById("sas-fabric-heading")?.focus({ preventScroll: true });
+      }
+      sasFabricShowAllButton.classList.toggle("hidden", hideShowAll);
     }
     if (!state.sasFabric.open) {
       return;
@@ -10759,7 +10762,32 @@
           return snapshot;
         }
         const matchingSlot = snapshot.slots.find((item) => Number(item.slot) === Number(payload.slot));
-        if (matchingSlot) matchingSlot.identify_active = payload.identify_active;
+        if (matchingSlot) {
+          // Retain the server's non-locate state on this snapshot, including
+          // fault/unknown/unmapped. JSON snapshot reuse must retain it too.
+          if (matchingSlot.state !== "identify") {
+            matchingSlot.state_before_identify = matchingSlot.state;
+          }
+          matchingSlot.identify_active = payload.identify_active;
+          if (payload.identify_active) {
+            matchingSlot.state = "identify";
+          } else if (matchingSlot.state === "identify") {
+            // A page can first load with locate already on, so there may be
+            // no saved state. Use its observed presence and fault evidence.
+            const raw = matchingSlot.raw_status || {};
+            const health = [matchingSlot.health, raw.status, raw.value]
+              .filter(Boolean).join(" ").toLowerCase().replaceAll("noncritical", "non-crit-code");
+            // Match the server's allowlisted status fields, never arbitrary
+            // descriptions or identifiers that happen to contain "fault".
+            const status = [raw.status, raw.value, raw.value_raw, raw.state, raw.sas_device_type]
+              .filter(value => value != null && typeof value !== "object").join(" ").toLowerCase();
+            const faulty = raw.ses_fault_sensed || raw.ses_fault_requested
+              || /fault|degrad|fail|unavail|offline|removed|critical/.test(health)
+              || /(?:^|[^a-z0-9])fault/.test(status);
+            matchingSlot.state = matchingSlot.state_before_identify
+              || (matchingSlot.present === false ? "empty" : faulty ? "fault" : matchingSlot.present ? "healthy" : "unknown");
+          }
+        }
         return snapshot;
       };
       const currentSnapshotMatchesOrigin = mutation.scope === currentUiScopeKey()
