@@ -36,6 +36,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- The immutable upgrade helper removed complete URL tokens from failure
+  summaries and named over-cap retention refusals with bounded count/cap
+  evidence, while preserving refusal, rollback, and busy retries (#995).
 - CORE SSH stopped stacking separate backplanes and AHCI SGPIO ports into one
   shelf drawn as the 60-bay CSE-946, and read pool names without the API
   (#955).
