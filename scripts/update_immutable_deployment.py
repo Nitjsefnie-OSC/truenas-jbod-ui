@@ -339,8 +339,18 @@ def _default_fetch_json(url: str) -> object:
                         payload = json.loads(data)
                     except (ValueError, RecursionError):
                         payload = None
-                    if isinstance(payload, dict) and payload.get("error") == "retention_scope_too_large":
-                        raise RetentionScopeTooLarge(payload) from None
+                    if isinstance(payload, dict):
+                        if payload.get("error") == "retention_scope_too_large":
+                            raise RetentionScopeTooLarge(payload) from None
+                        # The baseline request reaches the predecessor, before
+                        # this update can activate the typed response (#986).
+                        # Recognize only its exact legacy object, never prose
+                        # substrings or counts absent from that contract.
+                        if payload.get("ok") is False and payload == {
+                            "ok": False,
+                            "detail": "This system has too many enclosures for a system-wide disk check.",
+                        }:
+                            raise RetentionScopeTooLarge({}) from None
         except OSError:
             pass
         finally:
