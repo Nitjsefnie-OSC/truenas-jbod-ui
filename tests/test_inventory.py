@@ -24147,6 +24147,38 @@ class InventoryDefaultRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_slot[0].device_name, "da10")
         self.assertEqual(by_slot[30].device_name, "da40")
 
+    async def test_core_ssh_same_model_shelves_keep_separate_options_bays_and_targets(self) -> None:
+        from tests import core_ses_fixtures as fx
+
+        ids = ("500cccc00000010", "500cccc00000020")
+        outputs = {"sesutil map": fx.sesutil_map(
+            ("ses0", "ExampleCo Shelf 0100", ids[0], 24, {0: "da0"}),
+            ("ses1", "ExampleCo Shelf 0100", ids[1], 24, {0: "da24"}),
+        )}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._core_ssh_only_service(temp_dir, outputs)
+            first = await service.get_snapshot(force_refresh=True)
+            second = await service.get_snapshot(selected_enclosure_id=ids[1])
+
+        self.assertEqual([option.id for option in first.enclosures], list(ids))
+        self.assertEqual([option.slot_count for option in first.enclosures], [24, 24])
+        for snapshot, enclosure_id, disk, device in (
+            (first, ids[0], "da0", "/dev/ses0"),
+            (second, ids[1], "da24", "/dev/ses1"),
+        ):
+            with self.subTest(enclosure_id=enclosure_id):
+                self.assertEqual(snapshot.selected_enclosure_id, enclosure_id)
+                self.assertEqual(len(snapshot.slots), 24)
+                self.assertNotEqual(snapshot.selected_profile.id, CORE_CSE_946_PROFILE_ID)
+                self.assertEqual({slot.device_name for slot in snapshot.slots if slot.device_name}, {disk})
+                for slot in snapshot.slots:
+                    self.assertEqual(slot.enclosure_id, enclosure_id)
+                    self.assertEqual(slot.ssh_ses_device, device)
+                    self.assertEqual(
+                        {(target["ses_device"], target["enclosure_id"]) for target in slot.ssh_ses_targets},
+                        {(device, enclosure_id)},
+                    )
+
     def test_a_combined_option_reports_its_real_bay_count(self) -> None:
         """A combined shelf of other than 60 bays is never drawn as the CSE-946."""
         service = self._bare_service()
@@ -24166,13 +24198,14 @@ class InventoryDefaultRegressionTests(unittest.IsolatedAsyncioTestCase):
         ssh_data = ParsedSSHData(
             ses_enclosures=[half("5000dddd", "Synthetic Front", 22), half("5000eeee", "Synthetic Rear", 22)]
         )
-        options = service._build_enclosure_options(
-            TrueNASRawData(enclosures=[], disks=[], pools=[], disk_temperatures={}, smart_test_results=[]),
+        # Explicitly selected stacks keep their real geometry. Automatic
+        # selection no longer infers a physical stack from front/rear labels.
+        combined = service._core_ssh_primary_option(
             ssh_data,
-            {"id": None, "label": None, "name": None},
+            "5000dddd+5000eeee",
+            {"5000dddd", "5000eeee"},
+            {"id": "5000dddd+5000eeee", "label": "Synthetic Front + Synthetic Rear"},
         )
-
-        combined = next(option for option in options if option.id == "5000dddd+5000eeee")
         self.assertEqual(combined.slot_count, 44)
         self.assertIsNone(service.profile_registry.select_profile_id(service.system, combined))
 
