@@ -36,6 +36,10 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Identical unprofiled SES shelves with different logical IDs stayed separate,
+  without joining their bays or locate targets. Verified Front/Rear shelf
+  parts still stacked, and explicitly selected combined shelves kept their
+  summed bay geometry and shelf-local locate targets (#1000).
 - History retained trusted disk identities when degraded SSH mapping lost or
   contradicted bay assignments, while healthy observations still recorded real
   changes (#1002).
