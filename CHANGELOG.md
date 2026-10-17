@@ -36,6 +36,8 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Encrypted portable 7z backups waited for password-terminal readiness before
+  sending the passphrase, avoiding an echoed or discarded password line (#1001).
 - Locate light readback immediately updated bay tiles and restored their prior
   state on clear, including cached views, and Connections Show all retained
   keyboard focus on its heading (#998).
