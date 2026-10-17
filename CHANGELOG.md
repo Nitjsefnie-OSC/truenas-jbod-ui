@@ -40,6 +40,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   without joining their bays or locate targets. Verified Front/Rear shelf
   parts still stacked, and explicitly selected combined shelves kept their
   summed bay geometry and shelf-local locate targets (#1000).
+- Locate light readback immediately updated bay tiles and restored their prior
+  state on clear, including cached views, and Connections Show all retained
+  keyboard focus on its heading (#998).
 - History adoption kept its committed success when the optional follow-up scan
   failed, warned that the source list needed a refresh, and preserved the last
   known list instead of displaying an empty result (#999).
