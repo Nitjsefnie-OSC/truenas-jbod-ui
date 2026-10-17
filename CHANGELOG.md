@@ -36,6 +36,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Admin storage-view edits survived queued repaints without restoring old input
+  values or losing pending candidate and platform bindings, while view and system
+  switches retained their own editor state (#1003).
 - Identical unprofiled SES shelves with different logical IDs stayed separate,
   without joining their bays or locate targets. Verified Front/Rear shelf
   parts still stacked, and explicitly selected combined shelves kept their
