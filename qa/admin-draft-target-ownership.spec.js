@@ -26,17 +26,25 @@ const bootstrap = {
   default_system_id: "system-a", admin: {},
   storage_view_templates: [{ id: "synthetic-manual", label: "Synthetic manual", kind: "manual", slot_count: 2, rows: 1, columns: 2 }],
 };
-const html = execFileSync(process.env.PYTHON || "python", ["-c", `
+const renderFixture = (fixture) => execFileSync(process.env.PYTHON || "python", ["-c", `
 import json, sys
 from jinja2 import Environment, FileSystemLoader
 from markupsafe import Markup
 env = Environment(loader=FileSystemLoader(sys.argv[1]), autoescape=True)
 env.filters['script_json_text'] = lambda text: Markup(text.replace('<', '\\\\u003c'))
 print(env.get_template('index.html').render(admin_bootstrap_json=sys.stdin.read(), url_for=lambda name, path: '/static/' + path))
-`, path.join(root, "admin_service/templates")], { input: JSON.stringify(bootstrap), encoding: "utf8" });
+`, path.join(root, "admin_service/templates")], { input: JSON.stringify(fixture), encoding: "utf8" });
+const html = renderFixture(bootstrap);
 
-async function openFixture(page) {
+async function openFixture(page, { platformBindings = false } = {}) {
   const pending = { saves: [], candidates: [], edits: [], states: 0, lists: 0, restores: [], inspections: 0, heldStates: [], holdState: false, errors: [], unexpected: [], state: JSON.parse(JSON.stringify(bootstrap)) };
+  if (platformBindings) {
+    pending.state.storage_view_templates[0].default_binding = view("view-a", "node-a").binding;
+    pending.state.storage_view_templates[0].platform_binding_defaults = {
+      esxi: { mode: "manual", device_names: ["synthetic-esxi-member"] },
+    };
+  }
+  const fixtureHtml = platformBindings ? renderFixture(pending.state) : html;
   page.on("pageerror", (error) => pending.errors.push(error.message));
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
@@ -45,7 +53,7 @@ async function openFixture(page) {
       pending.unexpected.push(url.href);
       return route.abort();
     }
-    if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: html });
+    if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: fixtureHtml });
     if (["admin.js", "admin_backups.js", "admin.css"].some((name) => url.pathname === `/static/${name}`)) {
       // Optional exact predecessor bytes allow semantic RED replay without editing the candidate.
       const source = url.pathname === "/static/admin.js" && process.env.ADMIN_DRAFT_SCRIPT
@@ -319,6 +327,86 @@ for (const next of ["rename", "system switch"]) {
     await acknowledge(r); await finished(page); clean(p);
   });
 }
+
+for (const [field, value, checkbox] of [["label", "After platform", false], ["enabled", false, true]]) {
+  test(`model/input platform binding then ${field} retains members and new input`, async ({ page }) => {
+    const p = await openFixture(page, { platformBindings: true });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const immediate = await page.evaluate(({ field, value, checkbox }) => {
+      const platform = document.querySelector("#setup-platform");
+      platform.value = "esxi";
+      platform.dispatchEvent(new Event("change", { bubbles: true }));
+      const control = document.getElementById(`setup-storage-view-${field}`);
+      if (checkbox) control.checked = value;
+      else control.value = value;
+      control.dispatchEvent(new Event("change", { bubbles: true }));
+      return checkbox ? control.checked : control.value;
+    }, { field, value, checkbox });
+    expect(immediate).toBe(value);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect(page.locator("#setup-storage-view-device-names")).toHaveValue("synthetic-esxi-member");
+    const r = await save(page, p);
+    expect(r.body.platform).toBe("esxi");
+    expect(r.body.storage_views[0].binding.device_names).toEqual(["synthetic-esxi-member"]);
+    expect(r.body.storage_views[0][field]).toBe(value);
+    await acknowledge(r); await finished(page); clean(p);
+  });
+}
+
+for (const action of ["one", "all"]) {
+  for (const [field, value, checkbox] of [["label", "After candidate", false], ["enabled", false, true], ["binding-mode", "hybrid", false], ["id", "after-candidate", false]]) {
+    test(`model/input candidate ${action} then ${field} retains binding and new input`, async ({ page }) => {
+      const p = await openFixture(page);
+      await candidateResponse(p.candidates.at(-1), "sdb");
+      await expect(page.locator('[data-storage-view-candidate-id="candidate-node-a"]')).toBeEnabled();
+      const immediate = await page.evaluate(({ action, field, value, checkbox }) => {
+        document.querySelector(action === "one"
+          ? '[data-storage-view-candidate-id="candidate-node-a"]'
+          : "#setup-storage-view-candidates-add-all-button").click();
+        const control = document.getElementById(`setup-storage-view-${field}`);
+        if (checkbox) control.checked = value;
+        else control.value = value;
+        control.dispatchEvent(new Event("change", { bubbles: true }));
+        return checkbox ? control.checked : control.value;
+      }, { action, field, value, checkbox });
+      expect(immediate).toBe(value);
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await expect(page.locator("#setup-storage-view-device-names")).toHaveValue("sdb");
+      const r = await save(page, p);
+      expect(r.body.storage_views[0].binding.device_names).toEqual(["sdb"]);
+      expect(r.body.storage_views[0].binding.target_system_id).toBe("node-a");
+      const saved = r.body.storage_views[0];
+      expect(field === "binding-mode" ? saved.binding.mode : saved[field]).toBe(value);
+      expect(saved.binding.serials).toEqual([]);
+      expect(saved.binding.pcie_addresses).toEqual([]);
+      await acknowledge(r); await finished(page); clean(p);
+    });
+  }
+}
+
+test("model/input consumed edit then candidate and raw draft retain both model delta and new controls", async ({ page }) => {
+  const p = await openFixture(page);
+  await candidateResponse(p.candidates.at(-1), "sdb");
+  await expect(page.locator('[data-storage-view-candidate-id="candidate-node-a"]')).toBeEnabled();
+  await page.evaluate(() => {
+    const devices = document.querySelector("#setup-storage-view-device-names");
+    devices.value = "sdc";
+    devices.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector('[data-storage-view-candidate-id="candidate-node-a"]').click();
+    const label = document.querySelector("#setup-storage-view-label");
+    label.value = "Raw newer draft";
+    label.dispatchEvent(new Event("input", { bubbles: true }));
+    const enabled = document.querySelector("#setup-storage-view-enabled");
+    enabled.checked = false;
+    enabled.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const r = await save(page, p);
+  expect(r.body.storage_views[0].binding.device_names).toEqual(["sdc", "sdb"]);
+  expect(r.body.storage_views[0].label).toBe("Raw newer draft");
+  expect(r.body.storage_views[0].enabled).toBe(false);
+  await acknowledge(r); await finished(page); clean(p);
+});
 
 test("loaded HA views with shared device names keep Add Hints and Add all target-local", async ({ page }) => {
   const pending = await openFixture(page);
