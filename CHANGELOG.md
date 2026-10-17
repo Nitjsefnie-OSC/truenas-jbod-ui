@@ -40,6 +40,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   without joining their bays or locate targets. Verified Front/Rear shelf
   parts still stacked, and explicitly selected combined shelves kept their
   summed bay geometry and shelf-local locate targets (#1000).
+- History retained trusted disk identities when degraded SSH mapping lost or
+  contradicted bay assignments, while healthy observations still recorded real
+  changes (#1002).
 - Encrypted portable 7z backups waited for password-terminal readiness before
   sending the passphrase, avoiding an echoed or discarded password line (#1001).
 - Locate light readback immediately updated bay tiles and restored their prior
