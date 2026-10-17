@@ -38,6 +38,10 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 - Admin storage-view edits survived queued repaints without restoring old input
   values, while view and system switches retained their own editor state (#1003).
+- Identical unprofiled SES shelves with different logical IDs stayed separate,
+  without joining their bays or locate targets. Verified Front/Rear shelf
+  parts still stacked, and explicitly selected combined shelves kept their
+  summed bay geometry and shelf-local locate targets (#1000).
 - History retained trusted disk identities when degraded SSH mapping lost or
   contradicted bay assignments, while healthy observations still recorded real
   changes (#1002).
