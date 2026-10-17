@@ -36,6 +36,8 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Admin storage-view edits survived queued repaints without restoring old input
+  values, while view and system switches retained their own editor state (#1003).
 - History retained trusted disk identities when degraded SSH mapping lost or
   contradicted bay assignments, while healthy observations still recorded real
   changes (#1002).
