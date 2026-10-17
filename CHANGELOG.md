@@ -38,8 +38,8 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 - Identical unprofiled SES shelves with different logical IDs stayed separate,
   without joining their bays or locate targets. Verified Front/Rear shelf
-  parts still stacked. Re-save bay assignments from an old combined view
-  against the individual shelf IDs if needed (#1000).
+  parts still stacked, and explicitly selected combined shelves kept their
+  summed bay geometry and shelf-local locate targets (#1000).
 - History adoption kept its committed success when the optional follow-up scan
   failed, warned that the source list needed a refresh, and preserved the last
   known list instead of displaying an empty result (#999).
