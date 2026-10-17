@@ -36,6 +36,10 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Identical unprofiled SES shelves with different logical IDs stayed separate,
+  without joining their bays or locate targets. Verified Front/Rear shelf
+  parts still stacked. Re-save bay assignments from an old combined view
+  against the individual shelf IDs if needed (#1000).
 - The immutable upgrade helper removed complete URL tokens from failure
   summaries and named over-cap retention refusals with bounded count/cap
   evidence, while preserving refusal, rollback, and busy retries (#995).
