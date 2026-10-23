@@ -232,8 +232,9 @@ class CIWorkflowContractTests(unittest.TestCase):
         # upload, the GHCR release workflow's Python setup for the
         # public-demo release gate, and the image-upgrade smoke's and the
         # upgrade-scenario job's checkouts, and the pull-request docs
-        # external-link workflow's checkout and Python setup.
-        self.assertEqual(action_count, 44)
+        # external-link workflow's checkout and Python setup, plus the
+        # qualification-only disposable matrix workflow's pinned checkout.
+        self.assertEqual(action_count, 45)
         self.assertEqual(unpinned, [])
         self.assertEqual(uncommented, [])
 
