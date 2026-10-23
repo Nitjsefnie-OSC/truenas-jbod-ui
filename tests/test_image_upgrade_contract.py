@@ -1049,7 +1049,7 @@ class EnospcStateScenarioTests(unittest.TestCase):
                                previous_version="1", candidate_image="candidate", candidate_version="2",
                                candidate_revision="revision", scenario="enospc-state")
 
-    def test_enospc_lifecycle_preserves_bytes_and_recovers_only_after_explicit_remount(self):
+    def test_enospc_lifecycle_preserves_bytes_and_recovers_only_after_explicit_freeing(self):
         self.exercise_lifecycle()
 
     def test_enospc_lifecycle_refuses_lost_replaced_or_fresh_history(self):
@@ -1072,29 +1072,39 @@ class EnospcStateScenarioTests(unittest.TestCase):
             ui = {"mappings": [["shelf-a", 1, "SYNTH-0001", "synthetic"]]}
             history = {"counts": {"slot_state_current": 3, "slot_events": 3, "metric_samples": 12},
                        "integrity": "ok"}
-            deployment.run_python.side_effect = lambda service, script: (before if script == smoke.READ_HISTORY_TREE
-                else {"errno": 28} if script == smoke.FILL_ENOSPC_HISTORY else {"ok": True})
+            deployment.run_python.side_effect = lambda service, script: {
+                smoke.READ_HISTORY_TREE: before,
+                smoke.FILL_ENOSPC_HISTORY: {"errno": 28},
+                smoke.CLEAR_ENOSPC_HISTORY: {"ok": True},
+            }[script]
+            written = False
 
             def read(service, script):
+                nonlocal written
                 if script == smoke.READ_HISTORY_TREE:
                     return before if changed is None else changed
                 if script == smoke.ENOSPC_WRITE_PROBE:
                     return {"errno": 28}
-                if script == smoke.READ_HISTORY and deployment.exec_python.call_count > 5:
-                    return {"integrity": "ok", "counts": {"slot_state_current": 4, "slot_events": 4, "metric_samples": 13}}
-                return ui if service == "enclosure-ui" else history
+                if script == smoke.seed_script(smoke.SEED_HISTORY, (4,), metrics_per_slot=1):
+                    written = True
+                    return {"ok": True}
+                if script == smoke.READ_HISTORY:
+                    return ({"integrity": "ok", "counts": {
+                        "slot_state_current": 4, "slot_events": 4, "metric_samples": 13,
+                    }} if written else history)
+                self.assertEqual((service, script), ("enclosure-ui", smoke.READ_UI))
+                return ui
 
             deployment.exec_python.side_effect = read
             with (
                 mock.patch.object(smoke, "Deployment", return_value=deployment),
                 mock.patch.object(smoke, "prepare_root"),
-                mock.patch.object(smoke, "install_enospc_history_mount"),
+                mock.patch.object(smoke, "install_enospc_history_mount") as install,
                 mock.patch.object(smoke, "seed_previous_release", return_value=(ui, history, {1: 4, 2: 4, 3: 4})),
                 mock.patch.object(smoke, "sha256", return_value="config"),
-                mock.patch.object(smoke, "wait_for_history_liveness"),
-                mock.patch.object(smoke, "run"),
+                mock.patch.object(smoke, "wait_for_history_liveness") as wait,
                 mock.patch.object(smoke, "check_enospc_runtime", return_value={"started": "unchanged"},
-                                  side_effect=[{"started": "unchanged"}, {"started": "replacement"}]
+                                  side_effect=[{"started": "unchanged"}, {"started": "replacement"}] + [{"started": "unchanged"}] * 9
                                   if replaced else None) as check,
                 mock.patch.object(smoke, "check_runtime") as healthy,
                 mock.patch.object(smoke, "history_api_view", side_effect=[
@@ -1116,6 +1126,8 @@ class EnospcStateScenarioTests(unittest.TestCase):
                     self.assertIn("writable_recovery=ok", result)
                     self.assertEqual(check.call_count, 11)
                     self.assertEqual(sleep.call_args_list, [mock.call(2)] * 10)
+                    install.assert_called_once_with(deployment)
+                    wait.assert_called_once_with("2")
                     healthy.assert_called_once_with(deployment, "candidate", "2", "revision")
                     deployment.pull_and_up.assert_called_once_with()
                     self.assertEqual(deployment.files, ())
@@ -1125,8 +1137,12 @@ class EnospcStateScenarioTests(unittest.TestCase):
                                              mock.call("up", "-d")])
                 if changed is None and not replaced:
                     self.assertEqual(calls[3:], [mock.call("stop", *smoke.SERVICES),
-                                                       mock.call("rm", "-f", *smoke.SERVICES)])
-                    deployment.run_python.assert_any_call("enclosure-history", smoke.CLEAR_ENOSPC_HISTORY)
+                                                mock.call("rm", "-f", *smoke.SERVICES)])
+                    self.assertEqual(deployment.run_python.call_args_list, [
+                        mock.call("enclosure-history", smoke.FILL_ENOSPC_HISTORY),
+                        mock.call("enclosure-history", smoke.READ_HISTORY_TREE),
+                        mock.call("enclosure-history", smoke.CLEAR_ENOSPC_HISTORY),
+                    ])
                     deployment.exec_python.assert_any_call("enclosure-history",
                         smoke.seed_script(smoke.SEED_HISTORY, (4,), metrics_per_slot=1))
                     self.assertEqual(deployment.exec_python.call_args_list[-1],
@@ -1237,7 +1253,7 @@ class EnospcStateScenarioTests(unittest.TestCase):
                         "--previous-image", "previous", "--previous-version", "1", "--candidate-image", "candidate",
                         "--candidate-version", "2", "--candidate-revision", "revision"]
                 with (mock.patch.object(smoke, "smoke", side_effect=failure, return_value="synthetic result"),
-                      mock.patch.object(smoke.subprocess, "run") as run,
+                      mock.patch.object(smoke.subprocess, "run", return_value=mock.Mock(returncode=0)) as run,
                       mock.patch.object(smoke.os.path, "ismount", return_value=True),
                       mock.patch("sys.stdout"), mock.patch("sys.stderr")):
                     self.assertEqual(smoke.main(argv), 1 if failure else 0)
@@ -1263,7 +1279,7 @@ class EnospcStateScenarioTests(unittest.TestCase):
             self.assertEqual(overlay, {"services": {"enclosure-history": {
                 "volumes": ["./history:/app/history:rw"],
             }}})
-            with (mock.patch.object(smoke.subprocess, "run") as run,
+            with (mock.patch.object(smoke.subprocess, "run", return_value=mock.Mock(returncode=0)) as run,
                   mock.patch.object(smoke.os.path, "ismount", return_value=True)):
                 smoke.cleanup(root)
             commands = [call.args[0] for call in run.call_args_list]
@@ -1274,7 +1290,7 @@ class EnospcStateScenarioTests(unittest.TestCase):
             ])
             # A failed unmount must leave the root intact instead of traversing a live mount.
             with (mock.patch.object(smoke.subprocess, "run", side_effect=[
-                    mock.Mock(returncode=0), mock.Mock(returncode=1)]) as run,
+                    mock.Mock(returncode=0), mock.Mock(returncode=1), mock.Mock(returncode=0)]) as run,
                   mock.patch.object(smoke.os.path, "ismount", return_value=True)):
                 with self.assertRaises(smoke.SmokeError):
                     smoke.cleanup(root)

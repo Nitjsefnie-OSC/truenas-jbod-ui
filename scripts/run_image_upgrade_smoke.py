@@ -28,6 +28,11 @@ commands.
   then its exact generation, catalog bytes and referenced segment bytes must
   survive the image-only upgrade and rollback while both releases read the
   combined hot and segmented history.
+* ``enospc-state``: seed v0.22.2 on an 8 MiB disposable tmpfs, then exhaust
+  its inodes before candidate startup. Require ENOSPC, the existing local-
+  storage refusal contract, live process, unchanged bytes and no restarts over
+  20 seconds. Explicitly remove the filler and prove retained reads and new
+  candidate writes. This is not a supported-storage or release-promotion decision.
 * ``readonly-state``: after seeding and stopping v0.22.2, mount its required
   history directory literally read-only for candidate startup. Require the
   existing local-storage refusal contract, live process, unchanged bytes and
@@ -63,9 +68,10 @@ HISTORY_PORT = 18181
 SERVICES = ("enclosure-ui", "enclosure-history")
 SMOKE_SYSTEM = "upgrade-smoke"
 SUCCESS_PREFIX = "image_upgrade_smoke=ok"
-SCENARIOS = ("base", "hardened", "interrupted-migration", "segmented-catalog", "readonly-state")
+SCENARIOS = ("base", "hardened", "interrupted-migration", "segmented-catalog", "readonly-state", "enospc-state")
 HARDENED_FILES = ("docker-compose.yml", "docker-compose.nonroot.yml")
 READONLY_FILES = ("docker-compose.yml", "docker-compose.readonly.yml")
+ENOSPC_FILES = ("docker-compose.yml", "docker-compose.enospc.yml")
 APP_UID = 10001
 
 # The one-time ownership step for adopting docker-compose.nonroot.yml, exactly
@@ -850,6 +856,70 @@ else:
 """
 
 
+ENOSPC_WRITE_PROBE = """
+import errno
+import json
+import os
+from pathlib import Path
+path = Path("/app/history/.upgrade-smoke-enospc-probe")
+try:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+except OSError as exc:
+    if exc.errno != errno.ENOSPC:
+        raise
+    print(json.dumps({"errno": exc.errno}))
+else:
+    os.close(descriptor)
+    path.unlink()
+    raise RuntimeError("required history mount has free space")
+"""
+
+
+# Exhaust only the fixture's finite inode budget. File creation itself must
+# fail with ENOSPC; unused data blocks do not make a full inode table writable.
+FILL_ENOSPC_HISTORY = """
+import errno
+import json
+import os
+from pathlib import Path
+root = Path("/app/history")
+space = os.statvfs(root)
+if not (0 < space.f_frsize * space.f_blocks <= 8 * 1024 * 1024 and 0 < space.f_files <= 256):
+    raise RuntimeError("history is not the bounded fixture filesystem")
+filler = root / ".upgrade-smoke-full"
+filler.mkdir()
+for number in range(257):
+    try:
+        descriptor = os.open(filler / str(number), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        if exc.errno != errno.ENOSPC:
+            raise
+        print(json.dumps({"errno": exc.errno}))
+        break
+    else:
+        os.close(descriptor)
+else:
+    raise RuntimeError("bounded fixture did not exhaust its inodes")
+"""
+
+CLEAR_ENOSPC_HISTORY = """
+import json
+import shutil
+shutil.rmtree("/app/history/.upgrade-smoke-full")
+print(json.dumps({"ok": True}))
+"""
+
+
+def install_enospc_history_mount(deployment: Deployment) -> None:
+    # Create the cleanup marker before mounting, including on partial setup.
+    (deployment.root / ENOSPC_FILES[-1]).write_text(json.dumps({
+        "services": {"enclosure-history": {"volumes": ["./history:/app/history:rw"]}},
+    }) + "\n", encoding="utf-8")
+    deployment.files = ENOSPC_FILES
+    run(["sudo", "mount", "-t", "tmpfs", "-o", "size=8m,nr_inodes=256", "tmpfs",
+         str(deployment.root / "history")])
+
+
 def install_readonly_history_mount(deployment: Deployment) -> None:
     # Compose merges volumes by container target. Only the history bind changes;
     # retain the published command, restart policy, healthcheck and UI mounts.
@@ -960,7 +1030,109 @@ def readonly_state(args: argparse.Namespace) -> str:
             "writable_recovery=ok")
 
 
+def check_enospc_runtime(deployment: Deployment, args: argparse.Namespace) -> dict:
+    """Local startup refusal is 503/down, not remote-source 200/degraded (#429)."""
+    image_id = run(["docker", "image", "inspect", "--format", "{{.Id}}", args.candidate_image]).strip()
+    revision = run(["docker", "image", "inspect", "--format",
+                    '{{index .Config.Labels "org.opencontainers.image.revision"}}', args.candidate_image]).strip()
+    expect(revision == args.candidate_revision, "ENOSPC candidate revision does not match")
+    identity = {}
+    for service in SERVICES:
+        container = deployment.compose("ps", "-q", service).strip()
+        expect(bool(container) and "\n" not in container, f"{service} must resolve to exactly one container")
+        state = json.loads(run(["docker", "inspect", "--format", "{{json .}}", container]))
+        expect(state["State"]["Status"] == "running" and state["RestartCount"] == 0,
+               f"{service} exited or restarted during ENOSPC refusal")
+        expect(state["Image"] == image_id, f"{service} does not run the ENOSPC candidate")
+        identity[service] = [container, state["State"]["StartedAt"]]
+        if service == "enclosure-history":
+            mounts = [mount for mount in state["Mounts"] if mount["Destination"] == "/app/history"]
+            expect(len(mounts) == 1 and mounts[0]["Type"] == "bind" and mounts[0]["RW"] is True
+                   and mounts[0]["Source"] == str(deployment.root / "history"),
+                   "required history mount is not the seeded ENOSPC bind")
+    for port in (UI_PORT, HISTORY_PORT):
+        status, live = get_json(f"http://127.0.0.1:{port}/livez")
+        expect(status == 200 and live.get("status") == "ok" and live.get("version") == args.candidate_version,
+               f"/livez on {port} does not identify the live candidate")
+    status, ui = get_json(f"http://127.0.0.1:{UI_PORT}/healthz")
+    expect(status == 200 and ui.get("status") in {"ok", "degraded"}, "safe UI access is unavailable")
+    status, health = get_json(f"http://127.0.0.1:{HISTORY_PORT}/healthz", read_error_body=True)
+    unavailable = "History storage is unavailable; see the service logs."
+    expect(status == 503 and health.get("status") == "down" and health.get("detail") == unavailable
+           and str(health.get("reason", "")).startswith("Cannot write to /app/history "),
+           "ENOSPC history must visibly refuse unavailable local storage, not report healthy recovery")
+    status, overview = get_json(f"http://127.0.0.1:{HISTORY_PORT}/api/history/overview", read_error_body=True)
+    expect(status == 503 and overview == {"detail": unavailable},
+           "ENOSPC history API must refuse rather than serve fresh active history")
+    return identity
+
+
+def enospc_state(args: argparse.Namespace) -> str:
+    """Exhaust a disposable required-state filesystem, then explicitly free it."""
+    root = args.root.resolve()
+    prepare_root(root, args.compose_fixture, args.config_fixture)
+    deployment = Deployment(root)
+    config_digest = sha256(root / "config/config.yaml")
+    install_enospc_history_mount(deployment)
+    before_ui, before_history, seeded = seed_previous_release(deployment, args)
+    deployment.compose("stop", *SERVICES)
+    # Exhaust only the fixture after the released writer closes and checkpoints.
+    expect(deployment.run_python("enclosure-history", FILL_ENOSPC_HISTORY) == {"errno": errno.ENOSPC},
+           "required history fixture did not exhaust with ENOSPC")
+    deployment.set_image(args.candidate_image)
+    deployment.compose("pull")
+    before_bytes = deployment.run_python("enclosure-history", READ_HISTORY_TREE)
+    expect("history.db" in before_bytes and before_bytes["history.db"][0] > 0, "seeded history bytes are missing")
+    # --wait would demand healthy storage and hide the intentional 503 behind a
+    # Compose timeout. Keep the ordinary up -d and bound the probe separately.
+    deployment.compose("up", "-d")
+    wait_for_history_liveness(args.candidate_version)
+    expect(deployment.exec_python("enclosure-history", ENOSPC_WRITE_PROBE) == {"errno": errno.ENOSPC},
+           "required history mount did not reject writes with ENOSPC")
+    identity = check_enospc_runtime(deployment, args)
+    for _ in range(10):
+        time.sleep(2)
+        expect(check_enospc_runtime(deployment, args) == identity, "container identity changed during refusal")
+    expect(deployment.exec_python("enclosure-history", READ_HISTORY_TREE) == before_bytes,
+           "history bytes or entries changed during ENOSPC refusal")
+    expect(sha256(root / "config/config.yaml") == config_digest, "config changed during ENOSPC refusal")
+    expect(deployment.exec_python("enclosure-ui", READ_UI)["mappings"] == before_ui["mappings"],
+           "mappings changed during ENOSPC refusal")
+
+    # Operator removes the injected fault, not an automatic repair. The same
+    # candidate must then open the same seeded store through normal startup.
+    deployment.compose("stop", *SERVICES)
+    expect(deployment.run_python("enclosure-history", CLEAR_ENOSPC_HISTORY) == {"ok": True},
+           "required history fixture could not be freed")
+    deployment.files = ()
+    # The bind stays writable; discard the refused processes so normal startup
+    # opens the same retained store again after the operator frees space.
+    deployment.compose("rm", "-f", *SERVICES)
+    deployment.pull_and_up()
+    check_runtime(deployment, args.candidate_image, args.candidate_version, args.candidate_revision)
+    after = deployment.exec_python("enclosure-history", READ_HISTORY)
+    expect(after["integrity"] == "ok" and after["counts"] == before_history["counts"],
+           "writable recovery lost predecessor history")
+    expect(history_api_view((1, 2, 3)) == expected_history_view(seeded),
+           "writable candidate cannot read retained predecessor history")
+    deployment.exec_python("enclosure-history", seed_script(SEED_HISTORY, (4,), metrics_per_slot=1))
+    seeded[4] = 1
+    expect(history_api_view((1, 2, 3, 4)) == expected_history_view(seeded),
+           "writable candidate did not retain its new history write")
+    written = deployment.exec_python("enclosure-history", READ_HISTORY)
+    expect(written["integrity"] == "ok" and written["counts"] == {
+        "slot_state_current": 4, "slot_events": 4, "metric_samples": 13,
+    }, "writable candidate history write failed integrity or count checks")
+    return (f"{SUCCESS_PREFIX} scenario=enospc-state previous={args.previous_version} "
+            f"candidate={args.candidate_version} revision={args.candidate_revision} "
+            "mount=rw fixture=tmpfs inode_budget=256 write_errno=ENOSPC livez=ok history_health=down history_http=503 "
+            "history_api=refused restarts=0 observation_seconds=20 history_bytes=unchanged "
+            "writable_recovery=ok")
+
+
 def smoke(args: argparse.Namespace) -> str:
+    if args.scenario == "enospc-state":
+        return enospc_state(args)
     if args.scenario == "readonly-state":
         return readonly_state(args)
     if args.scenario == "interrupted-migration":
@@ -971,6 +1143,8 @@ def smoke(args: argparse.Namespace) -> str:
 
 
 def compose_chain(root: Path) -> list[str]:
+    if (root / ENOSPC_FILES[-1]).exists():
+        return [arg for name in ENOSPC_FILES for arg in ("-f", name)]
     if (root / READONLY_FILES[-1]).exists():
         return [arg for name in READONLY_FILES for arg in ("-f", name)]
     if (root / "docker-compose.nonroot.yml").exists():
@@ -982,6 +1156,9 @@ def cleanup(root: Path) -> None:
     if (root / "docker-compose.yml").exists():
         subprocess.run(["docker", "compose", *compose_chain(root), "down", "--volumes", "--remove-orphans"],
                        cwd=root, check=False)
+    if (root / ENOSPC_FILES[-1]).exists() and os.path.ismount(root / "history"):
+        result = subprocess.run(["sudo", "umount", str(root / "history")], check=False)
+        expect(result.returncode == 0, "ENOSPC fixture unmount failed; leaving the deployment root intact")
     subprocess.run(["sudo", "rm", "-rf", str(root)], check=False)
 
 
