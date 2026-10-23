@@ -121,6 +121,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Internal
 
+- Added an inactive source-qualified CORE expander-counter command policy
+  draft with exact read-only request shapes; no grant, collector or host
+  capability was enabled (#1017).
 - Added an inactive all-writer orchestration prototype with synthetic process
   tests; the ownership helper's stop-every-writer precondition remained
   unchanged, with no live backend or activation (#1014).
