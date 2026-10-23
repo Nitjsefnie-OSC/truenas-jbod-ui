@@ -101,6 +101,12 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   system saved with one keeps it, the drive list heading matches its drives,
   and NVMe drives no longer start with "UNKNOWN" (#966).
 
+### Performance
+
+- History summary scans reused authenticated immutable segment counts on warm
+  reads, retaining existing segment admission checks and fresh hot-database
+  counts (#1012).
+
 ### Internal
 
 - Added an inactive all-writer orchestration prototype with synthetic process
