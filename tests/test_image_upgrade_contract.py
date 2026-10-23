@@ -1060,7 +1060,28 @@ class EnospcStateScenarioTests(unittest.TestCase):
     def test_enospc_lifecycle_refuses_a_replaced_container_even_without_a_restart_count(self):
         self.exercise_lifecycle(replaced=True)
 
-    def exercise_lifecycle(self, *, changed=None, replaced=False):
+    def test_enospc_recovery_rejects_invalid_integrity_or_lost_counts(self):
+        for recovered in ({"integrity": "corrupt", "counts": {
+                "slot_state_current": 3, "slot_events": 3, "metric_samples": 12}},
+                {"integrity": "ok", "counts": {}}):
+            with self.subTest(recovered=recovered):
+                self.exercise_lifecycle(recovered=recovered)
+
+    def test_enospc_startup_wait_has_fault_specific_bounded_diagnostics(self):
+        smoke = self.load_smoke()
+        with (mock.patch.object(smoke, "get_json", side_effect=OSError("not listening")),
+              mock.patch.object(smoke.time, "monotonic", side_effect=[0, 1, 60]),
+              mock.patch.object(smoke.time, "sleep") as sleep):
+            with self.assertRaisesRegex(smoke.SmokeError, "ENOSPC history startup.*within 60 seconds"):
+                smoke.wait_for_history_liveness("2", fault="ENOSPC")
+            sleep.assert_called_once_with(1)
+        with mock.patch.object(smoke, "get_json", return_value=(200, {"status": "ok", "version": "1"})):
+            with self.assertRaisesRegex(smoke.SmokeError, "ENOSPC history /livez.*live candidate"):
+                smoke.wait_for_history_liveness("2", fault="ENOSPC")
+        with mock.patch.object(smoke, "get_json", return_value=(200, {"status": "ok", "version": "2"})):
+            smoke.wait_for_history_liveness("2", fault="ENOSPC")
+
+    def exercise_lifecycle(self, *, changed=None, replaced=False, recovered=None):
         smoke = self.load_smoke()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1068,6 +1089,9 @@ class EnospcStateScenarioTests(unittest.TestCase):
             deployment = mock.Mock(spec=smoke.Deployment)
             deployment.files = ()
             deployment.root = root
+            sequence = mock.Mock()
+            sequence.attach_mock(deployment.run_python, "run_python")
+            sequence.attach_mock(deployment.pull_and_up, "pull_and_up")
             before = {"history.db": [20, "original"]}
             ui = {"mappings": [["shelf-a", 1, "SYNTH-0001", "synthetic"]]}
             history = {"counts": {"slot_state_current": 3, "slot_events": 3, "metric_samples": 12},
@@ -1078,6 +1102,7 @@ class EnospcStateScenarioTests(unittest.TestCase):
                 smoke.CLEAR_ENOSPC_HISTORY: {"ok": True},
             }[script]
             written = False
+            recovered_history = history if recovered is None else recovered
 
             def read(service, script):
                 nonlocal written
@@ -1091,7 +1116,7 @@ class EnospcStateScenarioTests(unittest.TestCase):
                 if script == smoke.READ_HISTORY:
                     return ({"integrity": "ok", "counts": {
                         "slot_state_current": 4, "slot_events": 4, "metric_samples": 13,
-                    }} if written else history)
+                    }} if written else recovered_history)
                 self.assertEqual((service, script), ("enclosure-ui", smoke.READ_UI))
                 return ui
 
@@ -1118,6 +1143,9 @@ class EnospcStateScenarioTests(unittest.TestCase):
                         smoke.enospc_state(args)
                     healthy.assert_not_called()
                     deployment.pull_and_up.assert_not_called()
+                elif recovered is not None:
+                    with self.assertRaisesRegex(smoke.SmokeError, "writable recovery lost predecessor history"):
+                        smoke.enospc_state(args)
                 else:
                     result = smoke.enospc_state(args)
                     self.assertIn("scenario=enospc-state", result)
@@ -1127,15 +1155,18 @@ class EnospcStateScenarioTests(unittest.TestCase):
                     self.assertEqual(check.call_count, 11)
                     self.assertEqual(sleep.call_args_list, [mock.call(2)] * 10)
                     install.assert_called_once_with(deployment)
-                    wait.assert_called_once_with("2")
+                    wait.assert_called_once_with("2", fault="ENOSPC")
                     healthy.assert_called_once_with(deployment, "candidate", "2", "revision")
                     deployment.pull_and_up.assert_called_once_with()
                     self.assertEqual(deployment.files, ())
+                    self.assertLess(sequence.mock_calls.index(mock.call.run_python(
+                        "enclosure-history", smoke.CLEAR_ENOSPC_HISTORY)),
+                        sequence.mock_calls.index(mock.call.pull_and_up()))
                 deployment.set_image.assert_called_once_with("candidate")
                 calls = deployment.compose.call_args_list
                 self.assertEqual(calls[:3], [mock.call("stop", *smoke.SERVICES), mock.call("pull"),
                                              mock.call("up", "-d")])
-                if changed is None and not replaced:
+                if changed is None and not replaced and recovered is None:
                     self.assertEqual(calls[3:], [mock.call("stop", *smoke.SERVICES),
                                                 mock.call("rm", "-f", *smoke.SERVICES)])
                     self.assertEqual(deployment.run_python.call_args_list, [

@@ -929,41 +929,43 @@ def install_readonly_history_mount(deployment: Deployment) -> None:
     deployment.files = READONLY_FILES
 
 
-def wait_for_history_liveness(version: str, timeout: int = 60) -> None:
+def wait_for_history_liveness(version: str, timeout: int = 60, *, fault: str = "read-only") -> None:
     deadline = time.monotonic() + timeout
     while True:
         try:
             status, payload = get_json(f"http://127.0.0.1:{HISTORY_PORT}/livez")
         except OSError:
             if time.monotonic() >= deadline:
-                raise SmokeError("read-only history startup did not become live within 60 seconds") from None
+                raise SmokeError(f"{fault} history startup did not become live within 60 seconds") from None
             time.sleep(1)
             continue
         expect(status == 200 and payload.get("status") == "ok" and payload.get("version") == version,
-               "read-only history /livez does not identify the live candidate")
+               f"{fault} history /livez does not identify the live candidate")
         return
 
 
-def check_readonly_runtime(deployment: Deployment, args: argparse.Namespace) -> dict:
+def check_storage_refusal_runtime(
+    deployment: Deployment, args: argparse.Namespace, *, fault: str, readonly: bool,
+) -> dict:
     """Local startup refusal is 503/down, not remote-source 200/degraded (#429)."""
     image_id = run(["docker", "image", "inspect", "--format", "{{.Id}}", args.candidate_image]).strip()
     revision = run(["docker", "image", "inspect", "--format",
                     '{{index .Config.Labels "org.opencontainers.image.revision"}}', args.candidate_image]).strip()
-    expect(revision == args.candidate_revision, "read-only candidate revision does not match")
+    expect(revision == args.candidate_revision, f"{fault} candidate revision does not match")
     identity = {}
     for service in SERVICES:
         container = deployment.compose("ps", "-q", service).strip()
         expect(bool(container) and "\n" not in container, f"{service} must resolve to exactly one container")
         state = json.loads(run(["docker", "inspect", "--format", "{{json .}}", container]))
         expect(state["State"]["Status"] == "running" and state["RestartCount"] == 0,
-               f"{service} exited or restarted during read-only refusal")
-        expect(state["Image"] == image_id, f"{service} does not run the read-only candidate")
+               f"{service} exited or restarted during {fault} refusal")
+        expect(state["Image"] == image_id, f"{service} does not run the {fault} candidate")
         identity[service] = [container, state["State"]["StartedAt"]]
         if service == "enclosure-history":
             mounts = [mount for mount in state["Mounts"] if mount["Destination"] == "/app/history"]
-            expect(len(mounts) == 1 and mounts[0]["Type"] == "bind" and mounts[0]["RW"] is False
+            expect(len(mounts) == 1 and mounts[0]["Type"] == "bind" and mounts[0]["RW"] is (not readonly)
                    and mounts[0]["Source"] == str(deployment.root / "history"),
-                   "required history mount is not the seeded read-only bind")
+                   f"required history mount is not the seeded {fault} bind")
     for port in (UI_PORT, HISTORY_PORT):
         status, live = get_json(f"http://127.0.0.1:{port}/livez")
         expect(status == 200 and live.get("status") == "ok" and live.get("version") == args.candidate_version,
@@ -974,11 +976,15 @@ def check_readonly_runtime(deployment: Deployment, args: argparse.Namespace) -> 
     unavailable = "History storage is unavailable; see the service logs."
     expect(status == 503 and health.get("status") == "down" and health.get("detail") == unavailable
            and str(health.get("reason", "")).startswith("Cannot write to /app/history "),
-           "read-only history must visibly refuse unavailable local storage, not report healthy recovery")
+           f"{fault} history must visibly refuse unavailable local storage, not report healthy recovery")
     status, overview = get_json(f"http://127.0.0.1:{HISTORY_PORT}/api/history/overview", read_error_body=True)
     expect(status == 503 and overview == {"detail": unavailable},
-           "read-only history API must refuse rather than serve fresh active history")
+           f"{fault} history API must refuse rather than serve fresh active history")
     return identity
+
+
+def check_readonly_runtime(deployment: Deployment, args: argparse.Namespace) -> dict:
+    return check_storage_refusal_runtime(deployment, args, fault="read-only", readonly=True)
 
 
 def readonly_state(args: argparse.Namespace) -> str:
@@ -1031,40 +1037,7 @@ def readonly_state(args: argparse.Namespace) -> str:
 
 
 def check_enospc_runtime(deployment: Deployment, args: argparse.Namespace) -> dict:
-    """Local startup refusal is 503/down, not remote-source 200/degraded (#429)."""
-    image_id = run(["docker", "image", "inspect", "--format", "{{.Id}}", args.candidate_image]).strip()
-    revision = run(["docker", "image", "inspect", "--format",
-                    '{{index .Config.Labels "org.opencontainers.image.revision"}}', args.candidate_image]).strip()
-    expect(revision == args.candidate_revision, "ENOSPC candidate revision does not match")
-    identity = {}
-    for service in SERVICES:
-        container = deployment.compose("ps", "-q", service).strip()
-        expect(bool(container) and "\n" not in container, f"{service} must resolve to exactly one container")
-        state = json.loads(run(["docker", "inspect", "--format", "{{json .}}", container]))
-        expect(state["State"]["Status"] == "running" and state["RestartCount"] == 0,
-               f"{service} exited or restarted during ENOSPC refusal")
-        expect(state["Image"] == image_id, f"{service} does not run the ENOSPC candidate")
-        identity[service] = [container, state["State"]["StartedAt"]]
-        if service == "enclosure-history":
-            mounts = [mount for mount in state["Mounts"] if mount["Destination"] == "/app/history"]
-            expect(len(mounts) == 1 and mounts[0]["Type"] == "bind" and mounts[0]["RW"] is True
-                   and mounts[0]["Source"] == str(deployment.root / "history"),
-                   "required history mount is not the seeded ENOSPC bind")
-    for port in (UI_PORT, HISTORY_PORT):
-        status, live = get_json(f"http://127.0.0.1:{port}/livez")
-        expect(status == 200 and live.get("status") == "ok" and live.get("version") == args.candidate_version,
-               f"/livez on {port} does not identify the live candidate")
-    status, ui = get_json(f"http://127.0.0.1:{UI_PORT}/healthz")
-    expect(status == 200 and ui.get("status") in {"ok", "degraded"}, "safe UI access is unavailable")
-    status, health = get_json(f"http://127.0.0.1:{HISTORY_PORT}/healthz", read_error_body=True)
-    unavailable = "History storage is unavailable; see the service logs."
-    expect(status == 503 and health.get("status") == "down" and health.get("detail") == unavailable
-           and str(health.get("reason", "")).startswith("Cannot write to /app/history "),
-           "ENOSPC history must visibly refuse unavailable local storage, not report healthy recovery")
-    status, overview = get_json(f"http://127.0.0.1:{HISTORY_PORT}/api/history/overview", read_error_body=True)
-    expect(status == 503 and overview == {"detail": unavailable},
-           "ENOSPC history API must refuse rather than serve fresh active history")
-    return identity
+    return check_storage_refusal_runtime(deployment, args, fault="ENOSPC", readonly=False)
 
 
 def enospc_state(args: argparse.Namespace) -> str:
@@ -1086,7 +1059,7 @@ def enospc_state(args: argparse.Namespace) -> str:
     # --wait would demand healthy storage and hide the intentional 503 behind a
     # Compose timeout. Keep the ordinary up -d and bound the probe separately.
     deployment.compose("up", "-d")
-    wait_for_history_liveness(args.candidate_version)
+    wait_for_history_liveness(args.candidate_version, fault="ENOSPC")
     expect(deployment.exec_python("enclosure-history", ENOSPC_WRITE_PROBE) == {"errno": errno.ENOSPC},
            "required history mount did not reject writes with ENOSPC")
     identity = check_enospc_runtime(deployment, args)
