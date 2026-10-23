@@ -51,6 +51,11 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Opening-view requests bounded scoring waits, kept persistence and collection
+  out of optional scoring, retained each snapshot's exact source and mapping
+  generation, and used saved then discovery order with a warning when busy,
+  timed out, over cap, or missing a snapshot association; forced refreshes retried
+  correlation once after overlapping background source updates (#997).
 - Locate actions retained a verified partial path result when another enclosure
   path failed, warned about the incomplete readback and refreshed once, without
   treating an unread path as confirmed off. Mapping saves also warned when an

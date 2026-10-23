@@ -4200,6 +4200,33 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
         self.assertEqual(view.profile_id, SCALE_SSG_FRONT_24_PROFILE_ID)
         self.assertIs(view.profile_pinned, True)
 
+    @staticmethod
+    def _bind_mock_order_producer(service: InventoryService) -> None:
+        # These tests replace the snapshot producer. Supply the same source/read
+        # association as that producer, without weakening ordering assertions or
+        # changing the separate unassociated-snapshot negative controls.
+        import weakref
+
+        original = service.get_snapshot
+        source = None  # The fixed fake provider represents one already-fetched bundle.
+
+        async def associated_snapshot(**kwargs):
+            nonlocal source
+            snapshot = await original(**kwargs)
+            inputs = service._opening_order_inputs_for(snapshot)
+            if (inputs is None or inputs[1] != service._snapshot_topology_generation
+                    or inputs[4] != service._source_bundle_generation):
+                if source is None:
+                    source = await service._get_inventory_source_bundle()
+                service._view_order_read_inputs[id(snapshot)] = (
+                    weakref.ref(snapshot), source, service._snapshot_topology_generation,
+                    service.mapping_store.load_read_snapshot(), [],
+                    service._source_bundle_generation, object(),
+                )
+            return snapshot
+
+        service.get_snapshot = AsyncMock(side_effect=associated_snapshot)
+
     def test_storage_view_runtime_ranks_all_enclosures_without_another_source_fetch(self) -> None:
         options = [
             EnclosureOption(id="enc-a", label="Enclosure A"),
@@ -4217,7 +4244,11 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
             system = SystemConfig(id="synthetic-system", label="Synthetic system")
             service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
             service.get_snapshot = AsyncMock(side_effect=get_snapshot)
+            service._get_opening_order_snapshot = AsyncMock(
+                side_effect=lambda enclosure_id, **kwargs: snapshots[enclosure_id],
+            )
             service._get_inventory_source_bundle = AsyncMock(return_value=self._empty_source_bundle())
+            self._bind_mock_order_producer(service)
             service._canonical_default_enclosure_id = "enc-a"
 
             runtime = asyncio.run(service.get_storage_view_runtime())
@@ -4249,7 +4280,11 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
             system = SystemConfig(id="synthetic-system", label="Synthetic system")
             service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
             service.get_snapshot = AsyncMock(side_effect=get_snapshot)
+            service._get_opening_order_snapshot = AsyncMock(
+                side_effect=lambda enclosure_id, **kwargs: snapshots[enclosure_id],
+            )
             service._get_inventory_source_bundle = AsyncMock(return_value=self._empty_source_bundle())
+            self._bind_mock_order_producer(service)
             return service
 
         with tempfile.TemporaryDirectory() as primed_dir, tempfile.TemporaryDirectory() as fresh_dir:
@@ -4288,7 +4323,11 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
             )
             service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
             service.get_snapshot = AsyncMock(side_effect=get_snapshot)
+            service._get_opening_order_snapshot = AsyncMock(
+                side_effect=lambda enclosure_id, **kwargs: snapshots[enclosure_id],
+            )
             service._get_inventory_source_bundle = AsyncMock(return_value=self._empty_source_bundle())
+            self._bind_mock_order_producer(service)
             saved = asyncio.run(service.get_storage_view_runtime(selected_enclosure_id="enc-a"))
             automatic = asyncio.run(
                 service.get_storage_view_runtime(selected_enclosure_id="enc-a", ignore_saved_view_order=True)
@@ -4320,7 +4359,11 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
             service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
             source_bundle = self._empty_source_bundle()
             service.get_snapshot = AsyncMock(side_effect=get_snapshot)
+            service._get_opening_order_snapshot = AsyncMock(
+                side_effect=lambda enclosure_id, **kwargs: snapshots[enclosure_id],
+            )
             service._get_inventory_source_bundle = AsyncMock(return_value=source_bundle)
+            self._bind_mock_order_producer(service)
 
             before = asyncio.run(service.get_storage_view_runtime(selected_enclosure_id="enc-a"))
             self.assertEqual(before.view_order[:2], ["enclosure:enc-b", "enclosure:enc-a"])
@@ -4360,14 +4403,18 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
             service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
             source_bundle = self._empty_source_bundle()
             service.get_snapshot = AsyncMock(side_effect=get_snapshot)
+            service._get_opening_order_snapshot = AsyncMock(
+                side_effect=lambda enclosure_id, **kwargs: snapshots[enclosure_id],
+            )
             service._get_inventory_source_bundle = AsyncMock(return_value=source_bundle)
+            self._bind_mock_order_producer(service)
 
             before = asyncio.run(service.get_storage_view_runtime(selected_enclosure_id="enc-b"))
             self.assertLess(
                 before.view_order.index("enclosure:enc-b"),
                 before.view_order.index("enclosure:enc-a"),
             )
-            self.assertTrue(service._cached_effective_view_order)
+            self.assertTrue(service._view_order_cache)
 
             refreshed = self._view_order_snapshot(
                 "synthetic-system", "enc-a", "Enclosure A", 4, options,
@@ -4403,24 +4450,26 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
             service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
             source_bundle = self._empty_source_bundle()
             service.get_snapshot = AsyncMock(side_effect=get_snapshot)
+            service._get_opening_order_snapshot = AsyncMock(
+                side_effect=lambda enclosure_id, **kwargs: fresh_other,
+            )
             service._get_snapshot_result = AsyncMock(
                 return_value=inventory_module.CacheResult(fresh_other, "forced")
             )
             service._get_inventory_source_bundle = AsyncMock(return_value=source_bundle)
+            self._bind_mock_order_producer(service)
 
             runtime = asyncio.run(
                 service.get_storage_view_runtime(force_refresh=True, selected_enclosure_id="enc-a")
             )
 
         self.assertEqual(runtime.view_order[0], "enclosure:enc-a")
-        service._get_snapshot_result.assert_awaited_once_with(
-            force_refresh=True,
-            selected_enclosure_id="enc-b",
-            allow_stale_cache=False,
-            force_source_refresh=False,
+        service._get_snapshot_result.assert_not_awaited()
+        service._get_opening_order_snapshot.assert_awaited_once_with(
+            "enc-b", source_bundle=source_bundle, active_snapshot=active,
         )
 
-    def test_runtime_view_order_refuses_oversized_enclosure_enumeration(self) -> None:
+    def test_runtime_view_order_falls_back_for_oversized_enclosure_enumeration(self) -> None:
         options = [
             EnclosureOption(id=f"enc-{index}", label=f"Enclosure {index}")
             for index in range(inventory_module.SYSTEM_RETENTION_MAX_ENCLOSURES + 1)
@@ -4439,10 +4488,17 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
             system = SystemConfig(id="synthetic-system", label="Synthetic system")
             service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
             service.get_snapshot = AsyncMock(side_effect=get_snapshot)
+            service._get_opening_order_snapshot = AsyncMock(
+                side_effect=lambda enclosure_id, **kwargs: snapshots[enclosure_id],
+            )
             service._get_inventory_source_bundle = AsyncMock(return_value=self._empty_source_bundle())
 
-            with self.assertRaises(inventory_module.SystemRetentionTooLargeError):
-                asyncio.run(service.get_storage_view_runtime(selected_enclosure_id=options[0].id))
+            runtime = asyncio.run(service.get_storage_view_runtime(selected_enclosure_id=options[0].id))
+            self.assertEqual(runtime.view_order, [
+                *(f"enclosure:{option.id}" for option in options), "view:primary-chassis",
+            ])
+            self.assertTrue(any("Opening-view scoring was skipped" in warning
+                                for warning in snapshots[options[0].id].warnings))
 
         self.assertEqual(service.get_snapshot.await_count, 1)
 
@@ -4463,22 +4519,29 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
 
         async def exercise(service: InventoryService) -> None:
             await service._view_order_recompute_lock.acquire()
+            task = asyncio.create_task(service.get_storage_view_runtime(selected_enclosure_id="enc-a"))
             try:
-                with self.assertRaises(inventory_module.SystemRetentionBusyError):
-                    await service.get_storage_view_runtime(selected_enclosure_id="enc-a")
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
             finally:
                 service._view_order_recompute_lock.release()
+            await asyncio.wait_for(task, 2)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             system = SystemConfig(id="synthetic-system", label="Synthetic system")
             service = build_inventory_service(Settings(), system, AsyncMock(), AsyncMock(), temp_dir)
             service._view_order_recompute_lock = asyncio.Lock()
             service.get_snapshot = AsyncMock(side_effect=get_snapshot)
+            service._get_opening_order_snapshot = AsyncMock(
+                side_effect=lambda enclosure_id, **kwargs: snapshots[enclosure_id],
+            )
             service._get_inventory_source_bundle = AsyncMock(return_value=self._empty_source_bundle())
+            self._bind_mock_order_producer(service)
 
             asyncio.run(exercise(service))
 
         self.assertEqual(service.get_snapshot.await_count, 1)
+        service._get_opening_order_snapshot.assert_awaited_once()
 
     def test_filtered_storage_view_runtime_preserves_opening_order_metadata(self) -> None:
         runtime = StorageViewRuntimePayload(
@@ -4554,6 +4617,7 @@ class InventoryStorageViewCandidateTests(unittest.TestCase):
             service._get_inventory_source_bundle = AsyncMock(
                 return_value=self._empty_source_bundle(raw_data=raw_data)
             )
+            self._bind_mock_order_producer(service)
 
             runtime = asyncio.run(service.get_storage_view_runtime(selected_enclosure_id="node-a"))
 
