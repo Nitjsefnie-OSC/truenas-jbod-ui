@@ -107,7 +107,7 @@
     "test_ssh_session_reuse": 51,
     "test_startup_config": 30,
     "test_startup_migration_recovery": 13,
-    "test_startup_writability": 20,
+    "test_startup_writability": 24,
     "test_storage_view_smart_batch": 10,
     "test_system_backup": 270,
     "test_system_setup_api_dialect": 17,

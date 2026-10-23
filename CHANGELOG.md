@@ -51,6 +51,8 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- History startup diagnosed full volumes and exhausted inodes with a space or
+  inode recovery remedy, while retaining ownership remedies for permissions (#1020).
 - Opening-view requests bounded scoring waits, kept persistence and collection
   out of optional scoring, retained each snapshot's exact source and mapping
   generation, and used saved then discovery order with a warning when busy,

@@ -489,7 +489,8 @@ class ImageOnlyUpgradeSmokeContractTests(unittest.TestCase):
         # The only ownership change is the documented one-time step that adopts
         # the overlay, and it runs in prepare_root, before the first start.
         prep = source.split("HARDENED_OWNERSHIP_PREP = (", 1)[1].split("\n)\n", 1)[0]
-        self.assertEqual(source.count("chown"), prep.count("chown"))
+        # A diagnostic may reject chown without executing an ownership repair.
+        self.assertEqual(source.count("sudo chown "), prep.count("sudo chown "))
         self.assertIn("HARDENED_OWNERSHIP_PREP", inspect.getsource(smoke.prepare_root))
         calls = []
         deployment = smoke.Deployment(Path("/nonexistent"))
@@ -1182,6 +1183,10 @@ class EnospcStateScenarioTests(unittest.TestCase):
     def test_enospc_runtime_distinguishes_local_refusal_from_liveness_or_remote_degradation(self):
         import copy
         import json
+        import sqlite3
+        from types import SimpleNamespace
+
+        from history_service.startup import HistoryStartupError, open_history_store_with_retries
 
         smoke = self.load_smoke()
         with tempfile.TemporaryDirectory() as directory:
@@ -1192,7 +1197,9 @@ class EnospcStateScenarioTests(unittest.TestCase):
                         "RestartCount": 0, "Mounts": [{"Destination": "/app/history", "Source": str(root / "history"),
                                                        "Type": "bind", "RW": True}]}
             for fault in (None, "restart", "remounted", "wrong-source", "other-image", "exited",
-                          "healthy-history", "remote-degraded", "wrong-reason", "active-api", "wrong-version"):
+                          "healthy-history", "remote-degraded", "wrong-reason", "active-api", "wrong-version",
+                          "ownership-only", "missing-remedy", "chown-remedy", "missing-capacity-diagnosis",
+                          "wrong-remedy-volume", "missing-inode-remedy", "product-inode-full"):
                 with self.subTest(fault=fault):
                     state = copy.deepcopy(baseline)
                     responses = {
@@ -1201,7 +1208,9 @@ class EnospcStateScenarioTests(unittest.TestCase):
                         f"http://127.0.0.1:{smoke.HISTORY_PORT}/livez": (200, {"status": "ok", "version": "2"}),
                         f"http://127.0.0.1:{smoke.HISTORY_PORT}/healthz": (503, {
                             "status": "down", "detail": "History storage is unavailable; see the service logs.",
-                            "reason": "Cannot write to /app/history (owned by uid 0, running as uid 0)."}),
+                            "reason": "Cannot write to /app/history because the filesystem is full. "
+                                      "On the Docker host, free space or inodes on the volume containing ./history, "
+                                      "then restart the history service."}),
                         f"http://127.0.0.1:{smoke.HISTORY_PORT}/api/history/overview": (503, {
                             "detail": "History storage is unavailable; see the service logs."}),
                     }
@@ -1220,6 +1229,32 @@ class EnospcStateScenarioTests(unittest.TestCase):
                             200, {"status": "ok" if fault == "healthy-history" else "degraded"})
                     elif fault == "wrong-reason":
                         responses[f"http://127.0.0.1:{smoke.HISTORY_PORT}/healthz"][1]["reason"] = "other failure"
+                    elif fault == "ownership-only":
+                        responses[f"http://127.0.0.1:{smoke.HISTORY_PORT}/healthz"][1]["reason"] = (
+                            "Cannot write to /app/history (owned by uid 0, running as uid 10001). "
+                            "On the Docker host run: sudo chown -R 10001:10001 ./history")
+                    elif fault == "missing-remedy":
+                        responses[f"http://127.0.0.1:{smoke.HISTORY_PORT}/healthz"][1]["reason"] = (
+                            "Cannot write to /app/history because the filesystem is full.")
+                    elif fault == "chown-remedy":
+                        responses[f"http://127.0.0.1:{smoke.HISTORY_PORT}/healthz"][1]["reason"] += (
+                            " Run sudo chown -R 10001:10001 ./history.")
+                    elif fault in {"missing-capacity-diagnosis", "wrong-remedy-volume", "missing-inode-remedy"}:
+                        old, new = {
+                            "missing-capacity-diagnosis": ("filesystem is full", "storage is unavailable"),
+                            "wrong-remedy-volume": ("./history", "./data"),
+                            "missing-inode-remedy": ("free space or inodes", "free space"),
+                        }[fault]
+                        payload = responses[f"http://127.0.0.1:{smoke.HISTORY_PORT}/healthz"][1]
+                        payload["reason"] = payload["reason"].replace(old, new)
+                    elif fault == "product-inode-full":
+                        error = sqlite3.OperationalError("unable to open database file")
+                        space = SimpleNamespace(f_bavail=1024, f_files=256, f_favail=0)
+                        with mock.patch("app.services.storage_writability.os.statvfs", return_value=space, create=True):
+                            with self.assertRaises(HistoryStartupError) as raised:
+                                open_history_store_with_retries(
+                                    mock.Mock(side_effect=error), directory="/app/history", attempts=1)
+                        responses[f"http://127.0.0.1:{smoke.HISTORY_PORT}/healthz"][1]["reason"] = raised.exception.reason
                     elif fault == "active-api":
                         responses[f"http://127.0.0.1:{smoke.HISTORY_PORT}/api/history/overview"] = (200, {})
                     elif fault == "wrong-version":
@@ -1233,7 +1268,7 @@ class EnospcStateScenarioTests(unittest.TestCase):
                     with (mock.patch.object(smoke, "run", side_effect=run),
                           mock.patch.object(deployment, "compose", return_value="container"),
                           mock.patch.object(smoke, "get_json", side_effect=lambda url, **kwargs: responses[url])):
-                        if fault is None:
+                        if fault in (None, "product-inode-full"):
                             self.assertEqual(set(smoke.check_enospc_runtime(deployment, args)), set(smoke.SERVICES))
                         else:
                             with self.assertRaises(smoke.SmokeError):

@@ -29,10 +29,11 @@ commands.
   survive the image-only upgrade and rollback while both releases read the
   combined hot and segmented history.
 * ``enospc-state``: seed v0.22.2 on an 8 MiB disposable tmpfs, then exhaust
-  its inodes before candidate startup. Require ENOSPC, the existing local-
-  storage refusal contract, live process, unchanged bytes and no restarts over
-  20 seconds. Explicitly remove the filler and prove retained reads and new
-  candidate writes. This is not a supported-storage or release-promotion decision.
+  its inodes before candidate startup. Require ENOSPC, local-storage refusal
+  with a disk-full diagnosis and space/inode recovery remedy, live process,
+  unchanged bytes and no restarts over 20 seconds. Explicitly remove the filler
+  and prove retained reads and new candidate writes. This is not a
+  supported-storage or release-promotion decision.
 * ``readonly-state``: after seeding and stopping v0.22.2, mount its required
   history directory literally read-only for candidate startup. Require the
   existing local-storage refusal contract, live process, unchanged bytes and
@@ -977,6 +978,11 @@ def check_storage_refusal_runtime(
     expect(status == 503 and health.get("status") == "down" and health.get("detail") == unavailable
            and str(health.get("reason", "")).startswith("Cannot write to /app/history "),
            f"{fault} history must visibly refuse unavailable local storage, not report healthy recovery")
+    if fault == "ENOSPC":
+        reason = str(health.get("reason", "")).lower()
+        expect("filesystem is full" in reason and "free space or inodes" in reason
+               and "./history" in reason and "chown" not in reason,
+               "ENOSPC history must report a disk-full diagnosis and space/inode recovery remedy")
     status, overview = get_json(f"http://127.0.0.1:{HISTORY_PORT}/api/history/overview", read_error_body=True)
     expect(status == 503 and overview == {"detail": unavailable},
            f"{fault} history API must refuse rather than serve fresh active history")
