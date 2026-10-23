@@ -42,6 +42,13 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
   on the separate shelves. Save those assignments again on the shelf they
   belong to (#1008).
 
+### Added
+
+- Disk details showed already-collected SAS JSON/text port counters and SATA
+  PHY events, preserving reported identities, missing values, exact totals and
+  saturation. Duplicate rows and retained metadata were bounded, without new
+  collection commands or counter resets (#1018).
+
 ### Fixed
 
 - Locate actions retained a verified partial path result when another enclosure
