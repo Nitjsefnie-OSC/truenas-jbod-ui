@@ -2213,6 +2213,43 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
             self.assertFalse((root / "backup-passphrase.tmp").exists(),
                              "the staging copy must not survive the install")
 
+    def test_backup_passphrase_staging_file_is_private_from_creation(self):
+        import os
+        import re
+        import stat
+
+        smoke = self.load_smoke()
+        real_open = os.open
+        created = []
+        staged = []
+
+        def recording_open(path, flags, mode=0o777, *args, **kwargs):
+            descriptor = real_open(path, flags, mode, *args, **kwargs)
+            created.append((Path(path).name, flags, stat.S_IMODE(os.fstat(descriptor).st_mode)))
+            return descriptor
+
+        def fake_run(command, **kwargs):
+            if command[:4] == ["sudo", "install", "-m", "0600"]:
+                staged.append(Path(command[-2]).read_text(encoding="ascii"))
+            return ""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # umask 0 shows the requested mode itself: a world-readable request
+            # would be visible here even though a later chmod could repair it.
+            previous_umask = os.umask(0)
+            try:
+                with (mock.patch.object(smoke.os, "open", side_effect=recording_open),
+                      mock.patch.object(smoke, "run", side_effect=fake_run)):
+                    smoke.install_backup_secrets(root)
+            finally:
+                os.umask(previous_umask)
+            self.assertEqual(created, [("backup-passphrase.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)],
+                             "the passphrase staging file must be created exclusively with mode 0600")
+            self.assertEqual(len(staged), 1)
+            self.assertRegex(staged[0], re.compile(r"\A[0-9a-f]{32}\n\Z"))
+            self.assertFalse((root / "backup-passphrase.tmp").exists())
+
     def test_backup_secrets_bootstrap_precedes_seeding_and_the_overlay_joins_after(self):
         import inspect
 

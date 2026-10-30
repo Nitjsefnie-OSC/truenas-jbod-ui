@@ -1459,8 +1459,9 @@ def install_backup_secrets(root: Path) -> None:
     secrets = root / "config" / "backup-secrets"
     run(["sudo", "install", "-d", "-o", "0", "-g", "0", "-m", "0700", str(secrets)])
     temporary = root / "backup-passphrase.tmp"
-    temporary.write_text(uuid.uuid4().hex + "\n", encoding="ascii")
-    temporary.chmod(0o600)
+    # Private from creation: no umask-dependent window before a later chmod.
+    with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="ascii") as handle:
+        handle.write(uuid.uuid4().hex + "\n")
     run(["sudo", "install", "-m", "0600", "-o", "0", "-g", "0",
          str(temporary), str(secrets / "backup-passphrase")])
     temporary.unlink()
