@@ -173,11 +173,12 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Docs
 
-- Added an upgrade qualification for an unavailable filesystem backup target:
-  the scheduler's own refusal names the target and failure class, the local
-  archive keeps the artifact with no restarts, and the operator restoring the
-  target is proven by byte readback; the published matrix documents the
-  bounded slice (#1028).
+- Added an upgrade qualification for an unavailable filesystem backup target
+  on a test-only scheduler overlay: the scheduler's own refusal names the
+  target and failure class, the local archive keeps the artifact with no
+  restarts, and the operator restoring the target is proven by byte readback;
+  the published matrix documents the bounded slice and keeps the published
+  backup scheduler's upgrade path untested (#1028).
 
 ### Internal
 
