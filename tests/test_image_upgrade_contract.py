@@ -1,6 +1,7 @@
 """Synthetic deployment contracts, not Docker acceptance evidence."""
 from dataclasses import replace
 from pathlib import Path
+import contextlib
 import tempfile
 import unittest
 from unittest import mock
@@ -1558,7 +1559,6 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
 
         smoke = self.load_smoke()
         self.assertIn("unavailable-backup-storage", smoke.SCENARIOS)
-        self.assertEqual(smoke.SCENARIOS[-1], "unavailable-backup-storage")
         for name, script in (
             ("config_change", smoke.config_change_script("upgrade-smoke-backup-before")),
             ("journal_append", smoke.journal_append_script("upgrade-smoke-backup-before")),
@@ -1567,7 +1567,15 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
                 compile(script, name, "exec")
         self.assertIn("save_mapping", smoke.CONFIG_CHANGE_PROBE)
         self.assertIn('journal.append("mapping.save", SUBJECT)', smoke.BACKUP_JOURNAL_APPEND)
-        with mock.patch.object(smoke, "unavailable_backup_storage", return_value="qualified") as scenario:
+        # Every sibling dispatch target answers too, so routing this scenario to
+        # one of them fails on the returned value rather than on a missing argument.
+        siblings = ("enospc_state", "readonly_state", "interrupted_migration", "segmented_catalog_upgrade",
+                    "upgrade_and_rollback")
+        with contextlib.ExitStack() as stack:
+            for sibling in siblings:
+                stack.enter_context(mock.patch.object(smoke, sibling, return_value=f"routed to {sibling}"))
+            scenario = stack.enter_context(
+                mock.patch.object(smoke, "unavailable_backup_storage", return_value="qualified"))
             args = SimpleNamespace(scenario="unavailable-backup-storage")
             self.assertEqual(smoke.smoke(args), "qualified")
             scenario.assert_called_once_with(args)
