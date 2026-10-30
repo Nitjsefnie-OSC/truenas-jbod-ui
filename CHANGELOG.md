@@ -51,6 +51,8 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Small segmented history reads skipped older sealed segments that could not
+  change the newest rows, avoiding a full sort of each unindexed segment (#1053).
 - Explained unplaced source observations whose only identity evidence was a bare
   device-mapper minor, without changing disk identity or retention totals (#1026).
 - Quantastor and Supermicro BMC requests no longer follow redirects to another
