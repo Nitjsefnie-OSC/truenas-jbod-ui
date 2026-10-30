@@ -51,6 +51,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Quantastor CLI trailing-comma repair kept commas inside quoted values, and
+  SMART summaries kept a reported zero temperature or self-test lifetime
+  instead of replacing it with slot fallback values (#1046).
 - Failed segmented history restore staging removed the hot-copy file it had
   created; SAS diagnostics labelled LOG SENSE page controls in command order
   and decoded REPORT LUNS and INQUIRY allocation lengths at full width (#1047).
