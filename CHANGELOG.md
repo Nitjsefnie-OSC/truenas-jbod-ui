@@ -51,6 +51,9 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Admin kept late-rendered buttons locked after it stopped, rejected fractional
+  profile builder sizes with a message, showed a failed drive discovery as a
+  failure, and let Move Up/Down reorder views that share an order (#1050).
 - Admin timing saves rejected fractional and boolean values instead of
   truncating them, delayed demo creation kept newer setup drafts, history
   adoption used the maintenance deadline and reported unconfirmed results as
