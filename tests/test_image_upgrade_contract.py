@@ -1623,8 +1623,22 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
     def test_unavailable_backup_storage_lifecycle_refuses_drifted_config_bytes(self):
         self.exercise_lifecycle(config_drift=True)
 
+    def test_unavailable_backup_storage_history_guard_does_not_depend_on_an_idle_collector(self):
+        # The released history service writes on its own clock while it runs:
+        # _run_loop starts a background pass after startup_grace_seconds (20 s,
+        # history_service/config.py:74) and repeats it on the poll or failure
+        # backoff interval (history_service/collector.py:888-1036, config.py:67
+        # and :71), and each pass may run retention (collector.py:1232-1270).
+        # Model that writer as landing at any step while the service is up.
+        self.exercise_lifecycle(history_writer="collector")
+
+    def test_unavailable_backup_storage_history_guard_still_catches_a_write_during_the_refusal(self):
+        # A write that does not come from the history service (the scheduler
+        # mounts ./history read-write) must still fail the unchanged-bytes guard.
+        self.exercise_lifecycle(history_writer="other")
+
     def exercise_lifecycle(self, *, changed=None, replaced=False, refusal_detail="1 remote copy failure(s)",
-                           config_drift=False):
+                           config_drift=False, history_writer=None):
         smoke = self.load_smoke()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1653,6 +1667,33 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
             ui_reads = []
             sha_calls = []
             order = []
+            history_service = {"running": False, "writes": 0}
+
+            def history_writer_step():
+                # "collector": only the live history service writes; "other":
+                # a writer outside it writes whether or not the service runs.
+                if history_writer == "other" or (history_writer == "collector" and history_service["running"]):
+                    history_service["writes"] += 1
+
+            def history_tree():
+                if not history_service["writes"]:
+                    return before
+                return {**before, "history.db": [20 + history_service["writes"], "written"]}
+
+            def compose(*command, **kwargs):
+                services = [part for part in command[1:] if not part.startswith("-")]
+                if command[0] == "stop" and (not services or "enclosure-history" in services):
+                    history_service["running"] = False
+                elif command[0] in ("up", "start", "restart") and (
+                        not services or "enclosure-history" in services):
+                    history_service["running"] = True
+                return ""
+
+            def pull_and_up():
+                history_service["running"] = True
+
+            deployment.compose.side_effect = compose
+            deployment.pull_and_up.side_effect = pull_and_up
 
             def sha_digest(path):
                 sha_calls.append(path)
@@ -1665,12 +1706,18 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
             def run_python(service, script):
                 if script == smoke.READ_HISTORY_TREE:
                     tree_reads.append(script)
-                    if len(tree_reads) == 1:
-                        return before
-                    return before if changed is None else changed
+                    # A live writer may land just before and just after any read.
+                    history_writer_step()
+                    if len(tree_reads) == 1 or changed is None:
+                        tree = history_tree()
+                    else:
+                        tree = changed
+                    history_writer_step()
+                    return tree
                 raise AssertionError(f"unexpected one-off probe: {script[:60]!r}")
 
             def read(service, script):
+                history_writer_step()
                 if script == smoke.READ_HISTORY:
                     return history
                 if script == smoke.READ_UI:
@@ -1710,7 +1757,7 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
                 mock.patch.object(smoke, "check_runtime") as healthy,
                 mock.patch.object(smoke, "history_api_view",
                                   return_value=smoke.expected_history_view({1: 4, 2: 4, 3: 4})),
-                mock.patch.object(smoke.time, "sleep") as sleep,
+                mock.patch.object(smoke.time, "sleep", side_effect=lambda seconds: history_writer_step()) as sleep,
             ):
                 bootstrap.side_effect = lambda *args, **kwargs: order.append("bootstrap") or mock.DEFAULT
                 if replaced:
@@ -1729,7 +1776,7 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
                         readback.assert_not_called()
                         self.assertEqual(wait_mock.call_count, 2)
                         self.assertEqual(healthy.call_count, 1)
-                    elif changed is not None:
+                    elif changed is not None or history_writer == "other":
                         with self.assertRaisesRegex(smoke.SmokeError, "history bytes or entries changed"):
                             smoke.unavailable_backup_storage(args)
                         self.assertEqual(fault.call_count, 1)
@@ -1757,7 +1804,12 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
                                          [root.resolve() / "config/config.yaml"] * 2,
                                          "the invariant limb must compare the seeded config digest, not a stub")
                     else:
-                        result = smoke.unavailable_backup_storage(args)
+                        try:
+                            result = smoke.unavailable_backup_storage(args)
+                        except smoke.SmokeError as exc:
+                            self.fail(f"the qualification refused a healthy run: {exc}")
+                        self.assertTrue(history_service["running"],
+                                        "the history service must be running again before the recovery checks")
                         self.assertIn("scenario=unavailable-backup-storage", result)
                         self.assertIn("target_refusals=1", result)
                         self.assertIn("target_refusal=ConfigurationError", result)
@@ -1792,8 +1844,16 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
                 self.assertEqual(waits, [(True, ""), (False, "2026-01-01T00:00:00+00:00"),
                                          (True, "2026-01-01T00:01:00+00:00")][:len(waits)])
                 deployment.set_image.assert_called_once_with("candidate")
+                # The history service is stopped for the snapshot and the
+                # refusal window, then started again unless the run failed first.
+                failed_before_restart = (replaced or changed is not None or history_writer == "other"
+                                         or refusal_detail != "1 remote copy failure(s)")
                 self.assertEqual(deployment.compose.call_args_list,
-                                 [mock.call("stop", *smoke.SERVICES), mock.call("pull")])
+                                 [mock.call("stop", *smoke.SERVICES), mock.call("pull"),
+                                  mock.call("stop", "enclosure-history")]
+                                 + ([] if failed_before_restart else [
+                                     mock.call("up", "-d", "--wait", "--wait-timeout", "300", "enclosure-history",
+                                               timeout=420)]))
                 journal_notes = [call.args[1] for call in deployment.exec_python.call_args_list
                                  if "ChangeJournal" in call.args[1]]
                 self.assertEqual(journal_notes, [smoke.journal_append_script(note)

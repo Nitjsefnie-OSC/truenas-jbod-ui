@@ -1716,8 +1716,11 @@ def unavailable_backup_storage(args: argparse.Namespace) -> str:
     check_backup_target_recovery(shipped)
     shipped_record = shipped["targets"][BACKUP_TARGET_ID]
 
-    # Snapshot after the released writers close and the candidate's startup
-    # writes settle; inject no history edit and no alternate storage path.
+    # Like readonly-state and enospc-state, snapshot with the history service
+    # stopped: its collector and retention passes write on their own clock, so
+    # the guard holds only while the scheduler is the one live writer of
+    # ./history. Inject no history edit and no alternate storage path.
+    deployment.compose("stop", "enclosure-history")
     before_bytes = deployment.run_python("enclosure-history", READ_HISTORY_TREE)
     expect("history.db" in before_bytes and before_bytes["history.db"][0] > 0, "seeded history bytes are missing")
 
@@ -1735,6 +1738,7 @@ def unavailable_backup_storage(args: argparse.Namespace) -> str:
 
     expect(deployment.run_python("enclosure-history", READ_HISTORY_TREE) == before_bytes,
            "history bytes or entries changed during the backup-target refusal")
+    deployment.compose("up", "-d", "--wait", "--wait-timeout", "300", "enclosure-history", timeout=420)
     expect(sha256(root / "config/config.yaml") == config_digest, "config changed during the backup-target refusal")
     during_ui = deployment.exec_python("enclosure-ui", READ_UI)
     expect(during_ui["mappings"] == before_ui["mappings"] + [["shelf-a", 4, "SYNTH-0004", "upgrade-smoke-backup-during"]],
