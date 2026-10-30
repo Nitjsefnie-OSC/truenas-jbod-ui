@@ -51,6 +51,10 @@ Format (see CONTRIBUTING.md, "Changelog And Release Notes"):
 
 ### Fixed
 
+- Admin timing saves rejected fractional and boolean values instead of
+  truncating them, delayed demo creation kept newer setup drafts, history
+  adoption used the maintenance deadline and reported unconfirmed results as
+  unknown, and storage-view history returned 422/413 for rejected requests (#1049).
 - Quantastor CLI trailing-comma repair kept commas inside quoted values, and
   SMART summaries kept a reported zero temperature or self-test lifetime
   instead of replacing it with slot fallback values (#1046).
