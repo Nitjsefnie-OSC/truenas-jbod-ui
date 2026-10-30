@@ -118,7 +118,10 @@ root not a directory through the existing bind mount, and requires the
 scheduler's own visible refusal: the status file names the target and the
 failure class, the local archive keeps the artifact, and the scheduler never
 restarts over 20 seconds. After that observation the operator restores the
-root, and the next backup ships byte-identically by readback. The segmented run uses v0.22.2's own migration module and reader, captures the
+root, and the next backup ships byte-identically by readback. An artifact
+built while the target is unavailable is never shipped later: the scheduler
+copies an archive to its targets only when it builds it, with no backfill, so
+that artifact stays local-only. The segmented run uses v0.22.2's own migration module and reader, captures the
 catalog generation plus exact catalog and segment digests, and requires the
 same identity and combined history view after upgrade and rollback. v0.22.2
 already has the current table layout and logical schema-version marker, so
