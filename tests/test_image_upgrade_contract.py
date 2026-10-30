@@ -1627,8 +1627,8 @@ class UnavailableBackupStorageScenarioTests(unittest.TestCase):
         # The released history service writes on its own clock while it runs:
         # _run_loop starts a background pass after startup_grace_seconds (20 s,
         # history_service/config.py:74) and repeats it on the poll or failure
-        # backoff interval (history_service/collector.py:888-1036, config.py:67
-        # and :71), and each pass may run retention (collector.py:1232-1270).
+        # backoff interval (history_service/collector.py:888-1006, config.py:67
+        # and :71), and a pass may run retention (collector.py:630, :1232).
         # Model that writer as landing at any step while the service is up.
         self.exercise_lifecycle(history_writer="collector")
 
